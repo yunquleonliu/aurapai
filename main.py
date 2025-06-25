@@ -19,6 +19,8 @@ from services.llm_manager import LLMManager
 from services.rag_service import RAGService
 from services.tool_service import ToolService
 from core.context_manager import ContextManager
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 # Configure logging
 logging.basicConfig(
@@ -102,28 +104,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 # Include API routes
 app.include_router(health.router, prefix="/api/v1", tags=["health"])
 app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
 app.include_router(rag.router, prefix="/api/v1", tags=["rag"])
 app.include_router(tools.router, prefix="/api/v1", tags=["tools"])
 
-# Add convenience routes without /api prefix for easier access
-app.include_router(health.router, prefix="/v1", tags=["health-simple"])
-app.include_router(chat.router, prefix="/v1", tags=["chat-simple"])
-app.include_router(rag.router, prefix="/v1", tags=["rag-simple"])
-app.include_router(tools.router, prefix="/v1", tags=["tools-simple"])
 
-
-@app.get("/")
+@app.get("/", response_class=FileResponse)
 async def root():
-    """Root endpoint with platform information."""
-    return {
-        "name": "Auro-PAI Platform Backend",
-        "version": "1.0.0",
-        "description": "AI assistance platform for Average Joys with local LLM integration",
-        "status": "running"
-    }
+    """Serve the main chat interface."""
+    return "static/index.html"
 
 
 @app.get("/api/v1/status")

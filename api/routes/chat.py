@@ -303,16 +303,94 @@ async def chat_test(req: Request, message: str = "Hello"):
         return {"error": str(e), "status": "failed"}
 
 
-# Add convenient aliases at /v1 path for easier access
-@router.post("/v1/chat", response_model=ChatResponse)
-async def chat_v1(request: ChatRequest, req: Request):
-    """Convenient alias for chat endpoint at /v1/chat path."""
-    return await chat(request, req)
+@router.get("/chat/stream")
+async def stream_chat_v1(
+    req: Request,
+    message: str,
+    session_id: Optional[str] = None,
+    provider: Optional[str] = None,
+    temperature: float = 0.7,
+    max_tokens: Optional[int] = None,
+    include_rag: bool = True,
+    include_tools: bool = True
+):
+    """Stream chat response (v1)."""
+    try:
+        llm_manager = req.app.state.llm_manager
+        context_manager = req.app.state.context_manager
+        rag_service = req.app.state.rag_service
+        tool_service = req.app.state.tool_service
+        
+        # Validate services are available
+        if not llm_manager:
+            raise HTTPException(status_code=503, detail="LLM service not available")
+        if not context_manager:
+            raise HTTPException(status_code=503, detail="Context manager not available")
+        
+        # Create or get session
+        if not session_id:
+            session_id = context_manager.create_session()
+        else:
+            session_id = session_id
+            if not context_manager.get_context(session_id):
+                context_manager.create_session(session_id)
+        
+        # Add user message to context
+        context_manager.add_user_message(session_id, message)
+        
+        # Build messages for LLM
+        messages = await _build_llm_messages(
+            session_id=session_id,
+            user_message=message,
+            context_manager=context_manager,
+            rag_service=rag_service if include_rag else None,
+            tool_service=tool_service if include_tools else None
+        )
+        
+        # Determine provider
+        llm_provider = LLMProvider(provider) if provider else None
+
+        async def event_generator():
+            full_response = ""
+            try:
+                # First, send the session_id as a separate event
+                session_info = {"session_id": session_id}
+                yield f"event: session_start\ndata: {json.dumps(session_info)}\n\n"
+
+                # Then, stream the content
+                async for chunk in llm_manager.generate_streaming_response(
+                    messages=messages,
+                    provider=llm_provider,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                ):
+                    if chunk:
+                        full_response += chunk
+                        # SSE format: event: message, data: {}
+                        message_event = {"content": chunk}
+                        yield f"event: message\ndata: {json.dumps(message_event)}\n\n"
+                
+                # Add complete response to context after streaming is finished
+                context_manager.add_assistant_message(session_id, full_response)
+                
+                # Send a final event to signal the end of the stream
+                yield "event: end\ndata: {}\n\n"
+
+            except Exception as e:
+                logger.error(f"Streaming error: {e}")
+                error_message = {"error": str(e)}
+                yield f"event: error\ndata: {json.dumps(error_message)}\n\n"
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+        
+    except Exception as e:
+        logger.error(f"Streaming error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/v1/health")
+@router.get("/health")
 async def health_v1(req: Request):
-    """Health check endpoint at /v1/health."""
+    """Health check endpoint."""
     return {"status": "healthy", "message": "Chat service is running"}
 
 
