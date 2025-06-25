@@ -44,9 +44,8 @@ class Settings(BaseSettings):
     
     # Tool Settings
     WEB_SEARCH_ENABLED: bool = True
-    WEB_SEARCH_API_KEY: Optional[str] = None  # For services like Bing, Google
-    WEB_SEARCH_ENGINE: str = "duckduckgo"  # duckduckgo, bing, google
-    
+    WEB_SEARCH_ENGINE: str = "duckduckgo"
+    WEB_SEARCH_MAX_RESULTS: int = 10
     URL_FETCH_TIMEOUT: int = 30
     URL_FETCH_MAX_SIZE: int = 1024 * 1024  # 1MB
     

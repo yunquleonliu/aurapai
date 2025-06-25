@@ -394,6 +394,41 @@ async def health_v1(req: Request):
     return {"status": "healthy", "message": "Chat service is running"}
 
 
+@router.get("/chat/test-search")
+async def test_web_search(req: Request, query: str = "latest news"):
+    """Test endpoint to verify web search functionality."""
+    try:
+        tool_service = req.app.state.tool_service
+        
+        if not tool_service:
+            return {"error": "Tool service not available"}
+        
+        # Test if query should trigger search
+        should_search = await _should_search_web(query)
+        
+        if should_search:
+            # Perform actual search
+            search_results = await tool_service.web_search(query, max_results=3)
+            
+            return {
+                "query": query,
+                "should_search": should_search,
+                "search_triggered": True,
+                "results_count": len(search_results),
+                "results": [result.to_dict() for result in search_results]
+            }
+        else:
+            return {
+                "query": query,
+                "should_search": should_search,
+                "search_triggered": False,
+                "message": "Query does not require web search"
+            }
+            
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+
+
 async def _build_llm_messages(
     session_id: str,
     user_message: str,
@@ -441,10 +476,18 @@ Guidelines:
         except Exception as e:
             logger.warning(f"RAG context retrieval failed: {e}")
     
-    # Add current task context
-    if conversation_context.get("current_task"):
-        task_message = f"Current task: {conversation_context['current_task']}"
-        messages.append({"role": "system", "content": task_message})
+    # Add web search context for time-sensitive queries
+    if tool_service and await _should_search_web(user_message):
+        try:
+            search_results = await tool_service.web_search(user_message, max_results=5)
+            if search_results:
+                web_context = "Recent web search results:\n\n"
+                for result in search_results:
+                    web_context += f"**{result.title}**\n{result.snippet}\nSource: {result.url}\n\n"
+                messages.append({"role": "system", "content": web_context})
+                logger.info(f"Added web search context for query: {user_message}")
+        except Exception as e:
+            logger.warning(f"Web search failed: {e}")
     
     # Add tool availability context
     if tool_service:
@@ -491,3 +534,51 @@ async def _stream_chat_response(
         logger.error(f"Streaming error: {e}")
         error_message = f"Error: {str(e)}"
         yield error_message
+
+
+async def _should_search_web(user_message: str) -> bool:
+    """Determine if a user message requires web search for current information."""
+    # Convert to lowercase for easier matching
+    message_lower = user_message.lower()
+    
+    # Time-sensitive keywords that indicate need for current information
+    time_sensitive_keywords = [
+        "latest", "recent", "current", "today", "yesterday", "this week", "this month",
+        "news", "breaking", "update", "now", "currently", "happening", "just",
+        "new", "fresh", "live", "real-time", "trending", "hot", "viral",
+        "2024", "2025",  # Current years
+        "what's", "whats", "what is happening", "what happened",
+        "stock price", "weather", "forecast", "score", "results",
+        "election", "covid", "pandemic", "crisis", "emergency"
+    ]
+    
+    # Question patterns that often need current info
+    question_patterns = [
+        "what's the", "what is the", "how is", "how are",
+        "when did", "when will", "when is", "where is",
+        "who won", "who is", "who are", "why did",
+        "tell me about recent", "give me the latest"
+    ]
+    
+    # Check for time-sensitive keywords
+    for keyword in time_sensitive_keywords:
+        if keyword in message_lower:
+            return True
+    
+    # Check for question patterns
+    for pattern in question_patterns:
+        if pattern in message_lower:
+            # Additional check for current context
+            current_indicators = ["today", "now", "current", "latest", "recent", "new"]
+            if any(indicator in message_lower for indicator in current_indicators):
+                return True
+    
+    # Check if message asks about specific events or companies that might need current info
+    if any(word in message_lower for word in ["price", "stock", "market", "economy", "gdp"]):
+        return True
+    
+    # Check for news-related queries
+    if any(word in message_lower for word in ["news", "report", "announcement", "released"]):
+        return True
+    
+    return False
