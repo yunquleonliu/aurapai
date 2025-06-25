@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aura-PAI Chat</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <!-- Marked.js for markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script> 
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-tabs">
+                <button class="sidebar-tab-button active" data-tab="chats">Chats</button>
+                <button class="sidebar-tab-button" data-tab="knowledge">Knowledge</button>
+            </div>
+            <div class="sidebar-content">
+                <div id="chats-tab" class="sidebar-tab-content active">
+                    <div class="sidebar-header">
+                        <h2>Chat Sessions</h2>
+                    </div>
+                    <ul id="session-list"></ul>
+                    <button id="clear-history-button">Clear History</button>
+                    <p class="disclaimer">All history is local and can be deleted.</p>
+                </div>
+                <div id="knowledge-tab" class="sidebar-tab-content" style="display: none;">
+                    <div class="sidebar-header">
+                        <h2>Knowledge Base</h2>
+                    </div>
+                    <div id="knowledge-base-controls">
+                        <p>Upload documents using the 📎 button in the chat input below. Supported formats: .pdf, .md, .txt, .py, .js, .html, .css</p>
+                        <button id="upload-document-sidebar-btn" class="upload-btn">📎 Upload Document</button>
+                    </div>
+                    <ul id="document-list"></ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-main">
+            <div class="chat-header">
+                <button id="menu-icon" class="menu-icon" aria-label="Toggle menu">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+                <h1>Aura-PAI</h1>
+            </div>
+            <div id="chat-container">
+                <div id="chat-messages"></div>
+            </div>
+            <div id="input-area">
+                <div id="image-preview" style="display: none;">
+                    <img id="preview-img" src="" alt="Image preview">
+                    <button id="remove-image" aria-label="Remove image">×</button>
+                </div>
+                <form id="chat-form">
+                    <div class="attachment-container">
+                        <button type="button" id="attach-button" aria-label="Attach file">📎</button>
+                        <div id="attachment-menu" class="attachment-menu" style="display: none;">
+                            <button type="button" id="attach-image-button">Image</button>
+                            <button type="button" id="attach-document-button">Document</button>
+                        </div>
+                    </div>
+                    <input type="file" id="image-input" accept="image/*" style="display: none;">
+                    <input type="file" id="document-input" accept=".pdf,.md,.txt,.py,.js,.html,.css" style="display: none;">
+                    <textarea id="message-input" placeholder="Type your message..." rows="1"></textarea>
+                    <button type="submit" id="send-button" aria-label="Send">&#10148;</button>
+                    <button type="button" id="public-send-button" aria-label="Public Send" title="Send using public LLM (Gemini, no real-time search)" style="background: #e0eaff; color: #1a4fa0; border: 1px solid #b3cfff; margin-left: 4px;">🌐</button>
+                    <button type="button" id="stop-button" style="display: none;" aria-label="Stop">&#9632;</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    <script type="module"  src="/static/js/app.js"></script>
+</body>
+</html>
