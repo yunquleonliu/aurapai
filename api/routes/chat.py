@@ -158,6 +158,41 @@ async def chat(request: ChatRequest, req: Request):
             tool_service=tool_service if request.include_tools else None
         )
         
+        # Check if this is an image generation request
+        image_gen_service = getattr(req.app.state, 'image_generation_service', None)
+        if image_gen_service and await image_gen_service.detect_image_generation_request(request.message):
+            # Route to image generation
+            try:
+                generated_images = await image_gen_service.generate_image(
+                    prompt=request.message,
+                    provider=None,  # Use default
+                    size="1024x1024",
+                    num_images=1
+                )
+                
+                # Build response with generated images
+                images_data = [img.to_dict() for img in generated_images]
+                response_text = f"Generated {len(generated_images)} image(s) for: '{request.message}'"
+                
+                # Add to context
+                context_manager.add_assistant_message(session_id, response_text)
+                
+                return ChatResponse(
+                    response=response_text,
+                    session_id=session_id,
+                    provider=generated_images[0].model if generated_images else "image-generator",
+                    model=generated_images[0].model if generated_images else "placeholder",
+                    metadata={
+                        "type": "image_generation",
+                        "images": images_data,
+                        "prompt": request.message,
+                        "count": len(generated_images)
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Image generation error in chat: {e}")
+                # Fall through to regular chat if image generation fails
+
         # Determine provider
         provider = None
         if request.provider:
@@ -636,7 +671,7 @@ async def _build_llm_messages(
     messages = []
     
     # System message with platform context (concise version)
-    system_prompt = """You are Auro-PAI, an AI assistant for code, documentation, and general tasks. You have:
+    system_prompt = """You are Aura-PAI, an AI assistant for code, documentation, and general tasks. You have:
 
 1. Conversation context
 2. Local codebase access (RAG)
@@ -803,7 +838,7 @@ async def _build_llm_messages_with_image(
     messages = []
     
     # System message with image analysis context (concise)
-    system_prompt = """You are Auro-PAI with vision capabilities. You can analyze images and have:
+    system_prompt = """You are Aura-PAI with vision capabilities. You can analyze images and have:
 
 1. Conversation context
 2. Codebase access (RAG)
@@ -862,3 +897,186 @@ They have shared an image. Please analyze this image and respond to their questi
     messages = truncate_context_to_limit(messages, max_tokens=4096)
     
     return messages
+
+
+@router.post("/chat/generate-images")
+async def generate_images_from_menu(
+    req: Request,
+    message: str = Form(...),
+    image: UploadFile = File(...),
+    style: str = Form("photorealistic"),
+    max_dishes: int = Form(5),
+    provider: Optional[str] = Form(None)
+):
+    """Generate images of dishes from a menu photo."""
+    try:
+        # Get services from app state
+        llm_manager = req.app.state.llm_manager
+        context_manager = req.app.state.context_manager
+        image_gen_service = getattr(req.app.state, 'image_generation_service', None)
+        
+        if not image_gen_service:
+            raise HTTPException(status_code=503, detail="Image generation service not available")
+        
+        # Process uploaded menu image
+        image_data = await image.read()
+        pil_image = Image.open(io.BytesIO(image_data))
+        
+        # Resize if too large
+        if pil_image.width > 1024 or pil_image.height > 1024:
+            pil_image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        
+        # Convert to base64
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format='JPEG', quality=85)
+        image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        # Extract dishes from menu using LLM
+        extraction_prompt = f"""
+Analyze this menu image and extract dish information. For each dish, provide:
+1. Dish name
+2. Brief description
+3. Price (if visible)
+
+Format as JSON list:
+[{{"name": "dish name", "description": "brief description", "price": "price"}}]
+
+User request: {message}
+Image: data:image/jpeg;base64,{image_base64}
+"""
+        
+        # Get dish list from LLM
+        llm_response = await llm_manager.generate_response(
+            messages=[{"role": "user", "content": extraction_prompt}],
+            max_tokens=1000
+        )
+        
+        # Parse dishes (you'd want more robust JSON parsing here)
+        try:
+            import json
+            import re
+            json_match = re.search(r'\[.*\]', llm_response.content, re.DOTALL)
+            if json_match:
+                dishes = json.loads(json_match.group())
+            else:
+                # Fallback: simple extraction
+                dishes = [{"name": "Sample Dish", "description": "Delicious food item"}]
+        except:
+            dishes = [{"name": "Sample Dish", "description": "Delicious food item"}]
+        
+        # Limit number of dishes
+        dishes = dishes[:max_dishes]
+        
+        # Generate images for each dish
+        generated_images = await image_gen_service.generate_multiple_dishes(
+            dishes=dishes,
+            style=style,
+            provider=provider
+        )
+        
+        return {
+            "success": True,
+            "message": f"Generated images for {len(generated_images)} dishes",
+            "dishes": dishes,
+            "generated_images": generated_images,
+            "style": style,
+            "provider": provider or "default"
+        }
+        
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/chat/generate-single-dish")
+async def generate_single_dish_image(
+    req: Request,
+    dish_name: str = Form(...),
+    description: str = Form(""),
+    style: str = Form("photorealistic"),
+    provider: Optional[str] = Form(None)
+):
+    """Generate image of a single dish by name and description."""
+    try:
+        image_gen_service = getattr(req.app.state, 'image_generation_service', None)
+        
+        if not image_gen_service:
+            raise HTTPException(status_code=503, detail="Image generation service not available")
+        
+        # Generate image
+        result = await image_gen_service.generate_dish_image(
+            dish_name=dish_name,
+            description=description,
+            style=style,
+            provider=provider
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Single dish generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/chat/generate-image")
+async def generate_image(
+    req: Request,
+    prompt: str = Form(...),
+    session_id: Optional[str] = Form(None),
+    provider: Optional[str] = Form(None),
+    size: str = Form("1024x1024"),
+    style: Optional[str] = Form(None),
+    num_images: int = Form(1)
+):
+    """Generate images from text prompts."""
+    try:
+        # Get services from app state
+        image_service = req.app.state.image_generation_service
+        context_manager = req.app.state.context_manager
+        
+        # Validate services are available
+        if not image_service:
+            raise HTTPException(status_code=503, detail="Image generation service not available")
+        if not context_manager:
+            raise HTTPException(status_code=503, detail="Context manager not available")
+        
+        # Create or get session
+        if not session_id:
+            session_id = context_manager.create_session()
+        else:
+            if not context_manager.get_context(session_id):
+                context_manager.create_session(session_id)
+        
+        # Add user request to context
+        context_manager.add_user_message(session_id, f"Generate image: {prompt}")
+        
+        # Generate images
+        generated_images = await image_service.generate_image(
+            prompt=prompt,
+            provider=provider,
+            size=size,
+            style=style,
+            num_images=min(num_images, 4)  # Limit to 4 images max
+        )
+        
+        # Build response
+        images_data = [img.to_dict() for img in generated_images]
+        
+        # Add to context
+        response_text = f"Generated {len(generated_images)} image(s) for prompt: '{prompt}'"
+        context_manager.add_assistant_message(session_id, response_text)
+        
+        return {
+            "message": response_text,
+            "session_id": session_id,
+            "images": images_data,
+            "metadata": {
+                "prompt": prompt,
+                "provider": generated_images[0].model if generated_images else "unknown",
+                "count": len(generated_images)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

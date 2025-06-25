@@ -18,6 +18,7 @@ from api.routes import chat, rag, tools, health
 from services.llm_manager import LLMManager
 from services.rag_service import RAGService
 from services.tool_service import ToolService
+from services.image_generation_service import ImageGenerationService
 from core.context_manager import ContextManager
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -33,16 +34,17 @@ logger = logging.getLogger(__name__)
 llm_manager: LLMManager = None
 rag_service: RAGService = None
 tool_service: ToolService = None
+image_generation_service: ImageGenerationService = None
 context_manager: ContextManager = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
-    global llm_manager, rag_service, tool_service, context_manager
+    global llm_manager, rag_service, tool_service, image_generation_service, context_manager
     
     # Startup
-    logger.info("Starting Auro-PAI Platform Backend...")
+    logger.info("Starting Aura-PAI Platform Backend...")
     
     try:
         # Initialize services
@@ -55,6 +57,9 @@ async def lifespan(app: FastAPI):
         tool_service = ToolService()
         await tool_service.initialize()
         
+        image_generation_service = ImageGenerationService()
+        await image_generation_service.initialize()
+        
         context_manager = ContextManager()
         await context_manager.initialize()
         
@@ -62,6 +67,7 @@ async def lifespan(app: FastAPI):
         app.state.llm_manager = llm_manager
         app.state.rag_service = rag_service
         app.state.tool_service = tool_service
+        app.state.image_generation_service = image_generation_service
         app.state.context_manager = context_manager
         
         logger.info("All services initialized successfully")
@@ -77,6 +83,8 @@ async def lifespan(app: FastAPI):
     
     if context_manager:
         await context_manager.cleanup()
+    if image_generation_service:
+        await image_generation_service.cleanup()
     if tool_service:
         await tool_service.cleanup()
     if rag_service:
@@ -89,7 +97,7 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI application
 app = FastAPI(
-    title="Auro-PAI Platform Backend",
+    title="Aura-PAI Platform Backend",
     description="AI assistance platform with local LLM, RAG, and tool integration",
     version="1.0.0",
     lifespan=lifespan

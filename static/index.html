@@ -1,16 +1,15 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Auro-PAI Chat</title>
+    <title>Aura-PAI Chat</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
     <div class="chat-container">
         <div class="chat-header">
-            <h1>Auro-PAI Assistant</h1>
+            <h1>Aura-PAI Assistant</h1>
         </div>
         <div class="chat-messages" id="chat-messages">
             <!-- Messages will be appended here -->
@@ -23,10 +22,15 @@
                     <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off">
                     <button type="submit" id="send-button">&#x27A4;</button>
                     <button type="button" id="stop-button" style="display: none;">&#x23F9;</button>
+                    <button type="button" id="generate-button" title="Generate Image">🎨</button>
                 </div>
                 <div id="image-preview" style="display: none;">
                     <img id="preview-img" src="" alt="Preview">
                     <button type="button" id="remove-image">✕</button>
+                    <span class="preview-actions">
+                        <!-- TODO: Revisit the functionality of this generate button -->
+                        <button type="button" id="generate-dishes-button" class="preview-action-btn">🎨 Generate</button>
+                    </span>
                 </div>
             </form>
         </div>

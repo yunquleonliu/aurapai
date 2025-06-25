@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     """Application settings and configuration."""
     
     # Basic application settings
-    APP_NAME: str = "Auro-PAI Platform Backend"
+    APP_NAME: str = "Aura-PAI Platform Backend"
     VERSION: str = "1.0.0"
     DEBUG: bool = False
     HOST: str = "0.0.0.0"
@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-pro"
+    
+    # Image Generation Settings
+    HUGGINGFACE_API_KEY: Optional[str] = None
+    IMAGE_GENERATION_ENABLED: bool = True
     
     # RAG Settings
     CHROMADB_HOST: str = "localhost"
