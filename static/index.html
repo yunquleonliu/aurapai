@@ -17,8 +17,17 @@
         </div>
         <div class="chat-input-container">
             <form id="chat-form" class="chat-input">
-                <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off">
-                <button type="submit" id="send-button">&#x27A4;</button>
+                <div class="input-row">
+                    <input type="file" id="image-input" accept="image/*" style="display: none;">
+                    <button type="button" id="attach-button" title="Attach Image">📎</button>
+                    <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off">
+                    <button type="submit" id="send-button">&#x27A4;</button>
+                    <button type="button" id="stop-button" style="display: none;">&#x23F9;</button>
+                </div>
+                <div id="image-preview" style="display: none;">
+                    <img id="preview-img" src="" alt="Preview">
+                    <button type="button" id="remove-image">✕</button>
+                </div>
             </form>
         </div>
     </div>

@@ -1,4 +1,3 @@
-
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background-color: #f5f5f7;
@@ -75,11 +74,17 @@ body {
 
 .chat-input {
     display: flex;
-    align-items: center;
+    flex-direction: column;
     background-color: #ffffff;
     border: 1px solid #dcdce1;
     border-radius: 22px;
     padding: 5px;
+}
+
+.input-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
 }
 
 #message-input {
@@ -108,4 +113,88 @@ body {
 
 #send-button:hover {
     background-color: #0056b3;
+}
+
+#attach-button {
+    background-color: #6c757d;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 34px;
+    height: 34px;
+    cursor: pointer;
+    font-size: 1.1em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.2s;
+}
+
+#attach-button:hover {
+    background-color: #5a6268;
+}
+
+#stop-button {
+    background-color: #dc3545;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 34px;
+    height: 34px;
+    cursor: pointer;
+    font-size: 1.1em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.2s;
+    margin-left: 5px;
+}
+
+#stop-button:hover {
+    background-color: #c82333;
+}
+
+#image-preview {
+    margin-top: 10px;
+    padding: 10px;
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#preview-img {
+    max-width: 100px;
+    max-height: 100px;
+    border-radius: 4px;
+    object-fit: cover;
+}
+
+#remove-image {
+    background-color: #dc3545;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+    font-size: 0.8em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.message.has-image {
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.message-image {
+    max-width: 250px;
+    max-height: 200px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    object-fit: cover;
 }

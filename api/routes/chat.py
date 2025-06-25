@@ -5,13 +5,16 @@ Chat API routes for Auro-PAI Platform
 Handles chat interactions with context-aware AI assistance.
 """
 
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import logging
 import json
 import asyncio
+import base64
+from PIL import Image
+import io
 
 from services.llm_manager import LLMProvider
 from core.context_manager import ContextManager
@@ -19,6 +22,64 @@ from core.context_manager import ContextManager
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Simple token estimation (rough approximation)
+def estimate_tokens(text: str) -> int:
+    """Rough estimate of tokens in text (approximately 4 characters per token)."""
+    return len(text) // 4
+
+def truncate_context_to_limit(messages: List[Dict[str, str]], max_tokens: int = 6000) -> List[Dict[str, str]]:
+    """Truncate messages to stay within token limit, keeping system messages and recent context."""
+    if not messages:
+        return messages
+    
+    # Always keep system messages
+    system_messages = [msg for msg in messages if msg.get("role") == "system"]
+    non_system_messages = [msg for msg in messages if msg.get("role") != "system"]
+    
+    # Estimate tokens for system messages
+    system_tokens = sum(estimate_tokens(msg.get("content", "")) for msg in system_messages)
+    
+    # Leave room for system messages and response
+    available_tokens = max_tokens - system_tokens - 500  # Reserve 500 tokens for response
+    
+    if available_tokens <= 0:
+        # If system messages are too long, truncate them too
+        truncated_system = []
+        current_tokens = 0
+        for msg in reversed(system_messages):
+            msg_tokens = estimate_tokens(msg.get("content", ""))
+            if current_tokens + msg_tokens <= max_tokens - 1000:
+                truncated_system.insert(0, msg)
+                current_tokens += msg_tokens
+            else:
+                # Truncate this message
+                available_chars = (max_tokens - current_tokens - 1000) * 4
+                if available_chars > 100:
+                    truncated_content = msg.get("content", "")[:available_chars] + "..."
+                    truncated_system.insert(0, {"role": msg["role"], "content": truncated_content})
+                break
+        return truncated_system + non_system_messages[-1:]  # Keep last user message
+    
+    # Add non-system messages in reverse order until we hit the limit
+    selected_messages = []
+    current_tokens = 0
+    
+    for msg in reversed(non_system_messages):
+        msg_tokens = estimate_tokens(msg.get("content", ""))
+        if current_tokens + msg_tokens <= available_tokens:
+            selected_messages.insert(0, msg)
+            current_tokens += msg_tokens
+        else:
+            # Try to fit a truncated version of this message if it's the user message
+            if msg.get("role") == "user" and not selected_messages:
+                available_chars = (available_tokens - current_tokens) * 4
+                if available_chars > 100:
+                    truncated_content = msg.get("content", "")[:available_chars] + "..."
+                    selected_messages.insert(0, {"role": msg["role"], "content": truncated_content})
+            break
+    
+    return system_messages + selected_messages
 
 
 class ChatMessage(BaseModel):
@@ -394,6 +455,129 @@ async def health_v1(req: Request):
     return {"status": "healthy", "message": "Chat service is running"}
 
 
+@router.post("/chat/image")
+async def chat_with_image(
+    req: Request,
+    message: str = Form(...),
+    image: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    provider: Optional[str] = Form(None),
+    temperature: float = Form(0.7),
+    max_tokens: Optional[int] = Form(None),
+    include_rag: bool = Form(True),
+    include_tools: bool = Form(True)
+):
+    """Chat endpoint with image upload support."""
+    try:
+        # Get services from app state
+        llm_manager = req.app.state.llm_manager
+        rag_service = req.app.state.rag_service
+        tool_service = req.app.state.tool_service
+        context_manager = req.app.state.context_manager
+        
+        # Validate services are available
+        if not llm_manager:
+            raise HTTPException(status_code=503, detail="LLM service not available")
+        if not context_manager:
+            raise HTTPException(status_code=503, detail="Context manager not available")
+        
+        # Validate image file
+        if not image.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+        
+        # Process image
+        image_data = await image.read()
+        
+        # Convert image to base64 for LLM
+        try:
+            pil_image = Image.open(io.BytesIO(image_data))
+            # Resize if too large
+            if pil_image.width > 1024 or pil_image.height > 1024:
+                pil_image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            
+            # Convert to RGB if necessary
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # Convert to base64
+            buffer = io.BytesIO()
+            pil_image.save(buffer, format='JPEG', quality=85)
+            image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
+        
+        # Create or get session
+        if not session_id:
+            session_id = context_manager.create_session()
+        else:
+            if not context_manager.get_context(session_id):
+                context_manager.create_session(session_id)
+        
+        # Add user message to context (with image info)
+        user_message_with_image = f"{message} [Image attached: {image.filename}]"
+        context_manager.add_user_message(session_id, user_message_with_image)
+        
+        # Build enhanced prompt for image analysis
+        image_prompt = f"""The user has shared an image and asked: "{message}"
+
+Please analyze the uploaded image and respond to their question. Describe what you see in the image and provide relevant insights based on the user's query.
+
+Image data: data:image/jpeg;base64,{image_base64}"""
+        
+        # Build messages for LLM including image
+        messages = await _build_llm_messages_with_image(
+            session_id=session_id,
+            user_message=message,
+            image_base64=image_base64,
+            context_manager=context_manager,
+            rag_service=rag_service if include_rag else None,
+            tool_service=tool_service if include_tools else None
+        )
+        
+        # Determine provider
+        llm_provider = None
+        if provider:
+            try:
+                llm_provider = LLMProvider(provider)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+        
+        # Generate response (non-streaming for images for now)
+        try:
+            from core.config import settings
+            llm_response = await asyncio.wait_for(
+                llm_manager.generate_response(
+                    messages=messages,
+                    provider=llm_provider,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                ),
+                timeout=settings.LLAMACPP_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=408, detail=f"Request timeout - LLM took longer than {settings.LLAMACPP_TIMEOUT} seconds to respond")
+        
+        # Add assistant response to context
+        context_manager.add_assistant_message(session_id, llm_response.content)
+        
+        # Build response
+        response = ChatResponse(
+            response=llm_response.content,
+            session_id=session_id,
+            provider=llm_response.provider,
+            model=llm_response.model,
+            usage=llm_response.usage,
+            metadata={"image_processed": True, "image_filename": image.filename}
+        )
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Image chat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/chat/test-search")
 async def test_web_search(req: Request, query: str = "latest news"):
     """Test endpoint to verify web search functionality."""
@@ -429,6 +613,17 @@ async def test_web_search(req: Request, query: str = "latest news"):
         return {"error": str(e), "status": "failed"}
 
 
+def estimate_token_count(text: str) -> int:
+    """Estimate token count for a text string."""
+    try:
+        # Use tiktoken for more accurate token counting
+        encoding = tiktoken.get_encoding("cl100k_base")  # GPT-4 encoding
+        return len(encoding.encode(text))
+    except:
+        # Fallback: rough estimation (1 token ≈ 4 characters)
+        return len(text) // 4
+
+
 async def _build_llm_messages(
     session_id: str,
     user_message: str,
@@ -440,19 +635,20 @@ async def _build_llm_messages(
     
     messages = []
     
-    # System message with platform context
-    system_prompt = """You are Auro-PAI, an AI assistant designed to help users with code, documentation, and general tasks. You have access to:
+    # System message with platform context (concise version)
+    system_prompt = """You are Auro-PAI, an AI assistant for code, documentation, and general tasks. You have:
 
-1. Context from previous conversations
-2. Local codebase and documentation (via RAG)
-3. Web search and URL fetching tools (when enabled)
+1. Conversation context
+2. Local codebase access (RAG)
+3. Real-time web search (for current info)
+4. URL fetching tools
 
 Guidelines:
-- Provide helpful, accurate, and contextually relevant responses
-- When suggesting code changes, explain the reasoning clearly
-- Use available tools when you need external information
-- Be transparent about your capabilities and limitations
-- Focus on practical, actionable advice"""
+- Provide helpful, accurate responses
+- Explain code changes clearly
+- Use web search for current events/news automatically
+- Be transparent about capabilities
+- Focus on practical advice"""
     
     messages.append({"role": "system", "content": system_prompt})
     
@@ -466,24 +662,31 @@ Guidelines:
             "content": msg["content"]
         })
     
-    # Add RAG context if available
+    # Add RAG context if available (optimized)
     if rag_service and user_message:
         try:
             rag_context = await rag_service.get_context_for_query(user_message)
             if rag_context["context"]:
-                rag_message = f"Relevant context from codebase:\n\n{rag_context['context']}"
+                # Truncate RAG context to prevent overflow
+                context_content = rag_context["context"]
+                if len(context_content) > 1000:  # Limit RAG context length
+                    context_content = context_content[:1000] + "...[truncated for length]"
+                rag_message = f"Relevant codebase context:\n{context_content}"
                 messages.append({"role": "system", "content": rag_message})
         except Exception as e:
             logger.warning(f"RAG context retrieval failed: {e}")
     
-    # Add web search context for time-sensitive queries
+    # Add web search context for time-sensitive queries (optimized)
     if tool_service and await _should_search_web(user_message):
         try:
-            search_results = await tool_service.web_search(user_message, max_results=5)
+            search_results = await tool_service.web_search(user_message, max_results=3)  # Reduced from 5 to 3
             if search_results:
-                web_context = "Recent web search results:\n\n"
-                for result in search_results:
-                    web_context += f"**{result.title}**\n{result.snippet}\nSource: {result.url}\n\n"
+                # Create more concise web context
+                web_context = "Recent web search results:\n"
+                for i, result in enumerate(search_results[:3], 1):
+                    # Truncate long snippets
+                    snippet = result.snippet[:150] + "..." if len(result.snippet) > 150 else result.snippet
+                    web_context += f"{i}. {result.title}\n{snippet}\nSource: {result.url}\n\n"
                 messages.append({"role": "system", "content": web_context})
                 logger.info(f"Added web search context for query: {user_message}")
         except Exception as e:
@@ -501,6 +704,9 @@ Guidelines:
     
     # Add current user message
     messages.append({"role": "user", "content": user_message})
+    
+    # Truncate context to stay within token limits
+    messages = truncate_context_to_limit(messages, max_tokens=4096)
     
     return messages
 
@@ -582,3 +788,77 @@ async def _should_search_web(user_message: str) -> bool:
         return True
     
     return False
+
+
+async def _build_llm_messages_with_image(
+    session_id: str,
+    user_message: str,
+    image_base64: str,
+    context_manager: ContextManager,
+    rag_service=None,
+    tool_service=None
+) -> List[Dict[str, str]]:
+    """Build messages for LLM including image context."""
+    
+    messages = []
+    
+    # System message with image analysis context (concise)
+    system_prompt = """You are Auro-PAI with vision capabilities. You can analyze images and have:
+
+1. Conversation context
+2. Codebase access (RAG)
+3. Web search for current info
+4. Image analysis abilities
+
+For images:
+- Describe what you see clearly
+- Answer specific questions about the image
+- Read/transcribe any text accurately
+- Identify objects, people, scenes, colors
+- Be honest if unclear about something"""
+    
+    messages.append({"role": "system", "content": system_prompt})
+    
+    # Add conversation history (excluding current message)
+    conversation_context = context_manager.build_context_for_llm(session_id)
+    for msg in conversation_context["messages"][:-1]:
+        messages.append({
+            "role": msg["role"],
+            "content": msg["content"]
+        })
+    
+    # Add RAG context if available
+    if rag_service and user_message:
+        try:
+            rag_context = await rag_service.get_context_for_query(user_message)
+            if rag_context["context"]:
+                rag_message = f"Relevant context from codebase:\n\n{rag_context['context']}"
+                messages.append({"role": "system", "content": rag_message})
+        except Exception as e:
+            logger.warning(f"RAG context retrieval failed: {e}")
+    
+    # Add web search for image-related queries if needed
+    if tool_service and await _should_search_web(user_message):
+        try:
+            search_results = await tool_service.web_search(user_message, max_results=3)
+            if search_results:
+                web_context = "Recent web search results:\n\n"
+                for result in search_results:
+                    web_context += f"**{result.title}**\n{result.snippet}\nSource: {result.url}\n\n"
+                messages.append({"role": "system", "content": web_context})
+        except Exception as e:
+            logger.warning(f"Web search failed: {e}")
+    
+    # Add current user message with image
+    image_message = f"""The user asks: "{user_message}"
+
+They have shared an image. Please analyze this image and respond to their question.
+
+[Image data: data:image/jpeg;base64,{image_base64}]"""
+    
+    messages.append({"role": "user", "content": image_message})
+    
+    # Truncate context to stay within token limits
+    messages = truncate_context_to_limit(messages, max_tokens=4096)
+    
+    return messages

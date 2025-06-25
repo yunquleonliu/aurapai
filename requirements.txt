@@ -60,3 +60,6 @@ asyncpg>=0.29.0
 # Utilities
 click>=8.1.0
 rich>=13.0.0
+
+# Tokenization
+tiktoken>=0.5.1
