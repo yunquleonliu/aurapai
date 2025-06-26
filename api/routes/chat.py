@@ -122,6 +122,32 @@ class ConversationHistory(BaseModel):
     message_count: int
 
 
+async def detect_intent_with_llm(llm_manager, prompt: str) -> str:
+    """
+    Use the LLM to classify the prompt as 'image', 'text', or 'ambiguous'.
+    """
+    system_prompt = (
+        "You are an intent classifier for a chat assistant. "
+        "Classify the following user prompt as one of: 'image', 'text', or 'ambiguous'. "
+        "Respond with only the label.\n"
+        f"Prompt: {prompt}\n"
+        "Label:"
+    )
+    # Use llama.cpp or your default LLM provider for intent detection
+    messages = [
+        {"role": "system", "content": system_prompt}
+    ]
+    try:
+        response = await llm_manager.generate_response(messages, max_tokens=1)
+        label = response.content.strip().lower()
+        if label not in {"image", "text", "ambiguous"}:
+            label = "ambiguous"
+        return label
+    except Exception as e:
+        # Fallback to ambiguous if LLM fails
+        return "ambiguous"
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, req: Request):
     """Main chat endpoint for AI interactions."""
@@ -131,6 +157,7 @@ async def chat(request: ChatRequest, req: Request):
         rag_service = req.app.state.rag_service
         tool_service = req.app.state.tool_service
         context_manager = req.app.state.context_manager
+        image_gen_service = getattr(req.app.state, 'image_generation_service', None)
         
         # Validate services are available
         if not llm_manager:
@@ -149,18 +176,12 @@ async def chat(request: ChatRequest, req: Request):
         # Add user message to context
         context_manager.add_user_message(session_id, request.message)
         
-        # Build messages for LLM
-        messages = await _build_llm_messages(
-            session_id=session_id,
-            user_message=request.message,
-            context_manager=context_manager,
-            rag_service=rag_service if request.include_rag else None,
-            tool_service=tool_service if request.include_tools else None
-        )
+        # --- INTENT DETECTION ---
+        intent = "text"
+        if image_gen_service:
+            intent = await detect_intent_with_llm(llm_manager, request.message)
         
-        # Check if this is an image generation request
-        image_gen_service = getattr(req.app.state, 'image_generation_service', None)
-        if image_gen_service and await image_gen_service.detect_image_generation_request(request.message):
+        if intent == "image":
             # Route to image generation
             try:
                 generated_images = await image_gen_service.generate_image(
@@ -169,14 +190,9 @@ async def chat(request: ChatRequest, req: Request):
                     size="1024x1024",
                     num_images=1
                 )
-                
-                # Build response with generated images
                 images_data = [img.to_dict() for img in generated_images]
                 response_text = f"Generated {len(generated_images)} image(s) for: '{request.message}'"
-                
-                # Add to context
                 context_manager.add_assistant_message(session_id, response_text)
-                
                 return ChatResponse(
                     response=response_text,
                     session_id=session_id,
@@ -192,7 +208,28 @@ async def chat(request: ChatRequest, req: Request):
             except Exception as e:
                 logger.error(f"Image generation error in chat: {e}")
                 # Fall through to regular chat if image generation fails
-
+        elif intent == "ambiguous":
+            clarification_msg = (
+                "Did you want to generate an image or get a text answer? "
+                "Please reply with 'image' or 'text'."
+            )
+            context_manager.add_assistant_message(session_id, clarification_msg)
+            return ChatResponse(
+                response=clarification_msg,
+                session_id=session_id,
+                provider="intent-classifier",
+                model="intent-classifier",
+                usage={},
+                metadata={"type": "clarification", "prompt": request.message}
+            )
+        # Build messages for LLM
+        messages = await _build_llm_messages(
+            session_id=session_id,
+            user_message=request.message,
+            context_manager=context_manager,
+            rag_service=rag_service if request.include_rag else None,
+            tool_service=tool_service if request.include_tools else None
+        )
         # Determine provider
         provider = None
         if request.provider:
@@ -200,7 +237,6 @@ async def chat(request: ChatRequest, req: Request):
                 provider = LLMProvider(request.provider)
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"Unknown provider: {request.provider}")
-        
         # Generate response
         if request.stream:
             return StreamingResponse(
@@ -648,6 +684,21 @@ async def test_web_search(req: Request, query: str = "latest news"):
         return {"error": str(e), "status": "failed"}
 
 
+@router.get("/test-search")
+async def test_search(query: str = Query(...), tool_service: ToolService = Depends(get_tool_service)):
+    """Test the web search tool directly."""
+    import logging
+    logger = logging.getLogger("aurapai.websearch")
+    logger.info(f"Test search endpoint called with query: {query}")
+    try:
+        results = await tool_service.web_search(query, max_results=3)
+        logger.info(f"Web search returned {len(results) if results else 0} results for query: {query}")
+        return {"results": [r.dict() for r in results]}
+    except Exception as e:
+        logger.warning(f"Web search failed in /test-search: {e}")
+        return {"error": str(e)}
+
+
 def estimate_token_count(text: str) -> int:
     """Estimate token count for a text string."""
     try:
@@ -713,8 +764,10 @@ Guidelines:
     
     # Add web search context for time-sensitive queries (optimized)
     if tool_service and await _should_search_web(user_message):
+        logger.info(f"Web search triggered for query: {user_message}")
         try:
             search_results = await tool_service.web_search(user_message, max_results=3)  # Reduced from 5 to 3
+            logger.info(f"Web search results: {search_results}")
             if search_results:
                 # Create more concise web context
                 web_context = "Recent web search results:\n"
@@ -724,6 +777,8 @@ Guidelines:
                     web_context += f"{i}. {result.title}\n{snippet}\nSource: {result.url}\n\n"
                 messages.append({"role": "system", "content": web_context})
                 logger.info(f"Added web search context for query: {user_message}")
+            else:
+                logger.warning(f"Web search returned no results for query: {user_message}")
         except Exception as e:
             logger.warning(f"Web search failed: {e}")
     
