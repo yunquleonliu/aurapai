@@ -84,11 +84,21 @@ class LLMManager:
     
     async def _check_llamacpp(self) -> bool:
         """Check if llama.cpp server is available."""
+        health_url = f"{settings.LLAMACPP_SERVER_URL}/health"
+        logger.info(f"Checking llama.cpp server health at: {health_url}")
         try:
-            async with self.session.get(f"{settings.LLAMACPP_SERVER_URL}/health") as response:
-                return response.status == 200
+            async with self.session.get(health_url) as response:
+                if response.status == 200:
+                    logger.info("llama.cpp server is available.")
+                    return True
+                else:
+                    logger.error(f"llama.cpp server returned status {response.status} from {health_url}")
+                    return False
+        except aiohttp.ClientConnectorError as e:
+            logger.error(f"Could not connect to llama.cpp server at {health_url}. Connection error: {e}")
+            return False
         except Exception as e:
-            logger.warning(f"llama.cpp server not available: {e}")
+            logger.error(f"An unexpected error occurred while checking llama.cpp server at {health_url}: {e}", exc_info=True)
             return False
     
     async def health_check(self) -> Dict[str, Any]:

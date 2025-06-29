@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
         image_generation_service = ImageGenerationService()
         await image_generation_service.initialize()
         
-        context_manager = ContextManager()
+        context_manager = ContextManager(rag_service)
         await context_manager.initialize()
         
         # Store services in app state for access in routes
@@ -125,7 +125,7 @@ app.include_router(tools.router, prefix="/api/v1", tags=["tools"])
 @app.get("/", response_class=FileResponse)
 async def root():
     """Serve the main chat interface."""
-    return "static/index.html"
+    return FileResponse("static/index.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/api/v1/status")

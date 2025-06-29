@@ -7,32 +7,41 @@
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-    <div class="chat-container">
-        <div class="chat-header">
-            <h1>Aura-PAI Assistant</h1>
+    <div class="container">
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h2>Chat Sessions</h2>
+            </div>
+            <ul id="session-list"></ul>
+            <button id="clear-history-button">Clear History</button>
+            <p class="disclaimer">All history is stored locally and can be deleted at any time.</p>
         </div>
-        <div class="chat-messages" id="chat-messages">
-            <!-- Messages will be appended here -->
-        </div>
-        <div class="chat-input-container">
-            <form id="chat-form" class="chat-input">
-                <div class="input-row">
-                    <input type="file" id="image-input" accept="image/*" style="display: none;">
-                    <button type="button" id="attach-button" title="Attach Image">📎</button>
-                    <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off">
-                    <button type="submit" id="send-button">&#x27A4;</button>
-                    <button type="button" id="stop-button" style="display: none;">&#x23F9;</button>
-                    <button type="button" id="generate-button" title="Generate Image">🎨</button>
-                </div>
+        <div class="chat-main">
+            <div class="chat-header">
+                <button id="menu-icon" class="menu-icon" aria-label="Toggle menu">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+                <h1>Aura-PAI</h1>
+            </div>
+            <div id="chat-container">
+                <div id="chat-messages"></div>
+            </div>
+            <div id="input-area">
                 <div id="image-preview" style="display: none;">
-                    <img id="preview-img" src="" alt="Preview">
-                    <button type="button" id="remove-image">✕</button>
-                    <span class="preview-actions">
-                        <!-- TODO: Revisit the functionality of this generate button -->
-                        <button type="button" id="generate-dishes-button" class="preview-action-btn">🎨 Generate</button>
-                    </span>
+                    <img id="preview-img" src="" alt="Image preview">
+                    <button id="remove-image" aria-label="Remove image">×</button>
                 </div>
-            </form>
+                <form id="chat-form">
+                    <button type="button" id="attach-button" aria-label="Attach image">📎</button>
+                    <input type="file" id="image-input" accept="image/*" style="display: none;">
+                    <textarea id="message-input" placeholder="Type your message..." rows="1"></textarea>
+                    <button type="submit" id="send-button" aria-label="Send">&#10148;</button>
+                    <button type="button" id="stop-button" style="display: none;" aria-label="Stop">&#9632;</button>
+                    <button type="button" id="generate-button" aria-label="Generate">&#10024;</button>
+                </form>
+            </div>
         </div>
     </div>
     <script src="/static/js/app.js"></script>

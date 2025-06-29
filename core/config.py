@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8080", "http://localhost:8001"]
     
     # LLM Settings
-    LLAMACPP_SERVER_URL: str = "http://10.0.0.206:8000"
+    LLAMACPP_SERVER_URL: str = "http://10.0.0.206:8080"
     LLAMACPP_MODEL_NAME: str = "mixtral-8x7b-instruct"
     LLAMACPP_TIMEOUT: int = 300
     
@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     CHROMADB_HOST: str = "localhost"
     CHROMADB_PORT: int = 8002
     CHROMADB_COLLECTION_NAME: str = "auro_pai_knowledge"
+    CHROMADB_PATH: str = "chroma_data"
     
     # Vector embedding settings
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"

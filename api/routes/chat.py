@@ -5,8 +5,8 @@ Chat API routes for Auro-PAI Platform
 Handles chat interactions with context-aware AI assistance.
 """
 
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, File, UploadFile, Form
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, File, UploadFile, Form, Query, Depends
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import logging
@@ -17,11 +17,123 @@ from PIL import Image
 import io
 
 from services.llm_manager import LLMProvider
+from services.tool_service import ToolService
+# --- PATCH: Add DuckDuckGo search for internet-based RAG ---
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    DDGS = None
+
+def duckduckgo_search(query, max_results=5):
+    if not DDGS:
+        return []
+    results = []
+    with DDGS() as ddgs:
+        for r in ddgs.text(query, region='wt-wt', safesearch='Moderate', timelimit='y'):
+            results.append({
+                "title": r.get("title"),
+                "snippet": r.get("body"),
+                "url": r.get("href")
+            })
+            if len(results) >= max_results:
+                break
+    return results
+
+def format_search_results(results):
+    return "\n".join([
+        f"{i+1}. {r['title']}\n{r['snippet']}\nURL: {r['url']}" for i, r in enumerate(results)
+    ])
+
+async def handle_tool_action(tool_action, user_message, session_id, llm_manager):
+    # Support both {"action": ...} and {"tool": {"name": ..., "parameters": ...}} formats
+    if "tool" in tool_action and isinstance(tool_action["tool"], dict):
+        tool_name = tool_action["tool"].get("name")
+        parameters = tool_action["tool"].get("parameters", {})
+        # Flatten to {"action": tool_name, ...parameters}
+        tool_action = {"action": tool_name}
+        tool_action.update(parameters)
+    action = tool_action.get("action")
+    # --- Tool: search_and_fetch ---
+    if action == "search_and_fetch":
+        query = tool_action.get("query") or user_message
+        results = duckduckgo_search(query)
+        context = format_search_results(results)
+        prompt = (
+            f"User question: {user_message}\n"
+            f"Web search results:\n{context}\n"
+            "Based on the above, write a concise, factual, and well-structured answer for the user."
+        )
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that summarizes web search results for the user."},
+            {"role": "user", "content": prompt}
+        ]
+        summary = await llm_manager.generate_response(messages, max_tokens=512)
+        return summary.content if hasattr(summary, 'content') else str(summary)
+    # --- Tool: web_search ---
+    if action == "web_search":
+        query = tool_action.get("query") or user_message
+        results = duckduckgo_search(query)
+        return format_search_results(results)
+    # --- Tool: url_fetch ---
+    if action == "url_fetch":
+        url = tool_action.get("url")
+        # Placeholder: implement actual URL fetch logic or call ToolService
+        return f"Fetched content from {url} (not yet implemented)"
+    # --- Tool: image_generation ---
+    if action == "image_generation":
+        prompt = tool_action.get("prompt") or user_message
+        # Try to get image service from session or global state
+        from fastapi import Request
+        # This assumes you have access to the FastAPI request object or app state
+        # For this handler, you may need to pass image_service as an argument in your actual code
+        # Here, we use a global fallback (not recommended for production)
+        try:
+            from fastapi import Request
+            image_service = None
+            # Try to get image_service from app state if available
+            import inspect
+            frame = inspect.currentframe()
+            while frame:
+                if 'req' in frame.f_locals:
+                    req = frame.f_locals['req']
+                    image_service = getattr(req.app.state, 'image_generation_service', None)
+                    break
+                frame = frame.f_back
+            if not image_service:
+                return "Image generation service not available."
+            images = await image_service.generate_image(prompt=prompt, provider=None, size="1024x1024", num_images=1)
+            if not images:
+                return "Image generation failed."
+            img_data = images[0].to_dict()
+            return f"[Image generated] URL: {img_data.get('url', '[no url]')} (base64 omitted)"
+        except Exception as e:
+            return f"Image generation error: {e}"
+    # --- Tool: image_analysis ---
+    if action == "image_analysis":
+        # Placeholder: implement actual image analysis logic
+        return "Image analysis result (not yet implemented)"
+    # --- Tool: text_generation ---
+    if action == "text_generation":
+        prompt = tool_action.get("prompt") or user_message
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt}
+        ]
+        summary = await llm_manager.generate_response(messages, max_tokens=512)
+        return summary.content if hasattr(summary, 'content') else str(summary)
+    # --- Tool: clarification ---
+    if action == "clarification":
+        return "Your request was ambiguous. Please clarify your intent."
+    # Fallback: return tool_action as JSON
+    return json.dumps(tool_action, ensure_ascii=False)
 from core.context_manager import ContextManager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+def get_tool_service(request: Request):
+    return request.app.state.tool_service
 
 # Simple token estimation (rough approximation)
 def estimate_tokens(text: str) -> int:
@@ -158,13 +270,13 @@ async def chat(request: ChatRequest, req: Request):
         tool_service = req.app.state.tool_service
         context_manager = req.app.state.context_manager
         image_gen_service = getattr(req.app.state, 'image_generation_service', None)
-        
+
         # Validate services are available
         if not llm_manager:
             raise HTTPException(status_code=503, detail="LLM service not available")
         if not context_manager:
             raise HTTPException(status_code=503, detail="Context manager not available")
-        
+
         # Create or get session
         if not request.session_id:
             session_id = context_manager.create_session()
@@ -172,48 +284,47 @@ async def chat(request: ChatRequest, req: Request):
             session_id = request.session_id
             if not context_manager.get_context(session_id):
                 context_manager.create_session(session_id)
-        
-        # Add user message to context
-        context_manager.add_user_message(session_id, request.message)
-        
+
+        # Add user message to context and persistent history
+        user_id = "default_user" # TODO: Replace with real user auth
+        await context_manager.add_user_message(user_id, session_id, request.message)
+
         # --- INTENT DETECTION ---
         intent = "text"
         if image_gen_service:
             intent = await detect_intent_with_llm(llm_manager, request.message)
-        
+
         if intent == "image":
-            # Route to image generation
-            try:
-                generated_images = await image_gen_service.generate_image(
-                    prompt=request.message,
-                    provider=None,  # Use default
-                    size="1024x1024",
-                    num_images=1
-                )
-                images_data = [img.to_dict() for img in generated_images]
-                response_text = f"Generated {len(generated_images)} image(s) for: '{request.message}'"
-                context_manager.add_assistant_message(session_id, response_text)
-                return ChatResponse(
-                    response=response_text,
-                    session_id=session_id,
-                    provider=generated_images[0].model if generated_images else "image-generator",
-                    model=generated_images[0].model if generated_images else "placeholder",
-                    metadata={
-                        "type": "image_generation",
-                        "images": images_data,
-                        "prompt": request.message,
-                        "count": len(generated_images)
-                    }
-                )
-            except Exception as e:
-                logger.error(f"Image generation error in chat: {e}")
-                # Fall through to regular chat if image generation fails
+            # ...existing code for image generation...
+            generated_images = await image_gen_service.generate_image(
+                prompt=request.message,
+                provider=None,  # Use default
+                size="1024x1024",
+                num_images=1
+            )
+            images_data = [img.to_dict() for img in generated_images]
+            response_text = f"Generated {len(generated_images)} image(s) for: '{request.message}'"
+            context_manager.add_assistant_message(session_id, response_text)
+            if rag_service:
+                await rag_service.add_chat_message(user_id, session_id, response_text, "assistant", metadata={"type": "image_generation"})
+            return ChatResponse(
+                response=response_text,
+                session_id=session_id,
+                provider=generated_images[0].model if generated_images else "image-generator",
+                model=generated_images[0].model if generated_images else "placeholder",
+                metadata={
+                    "type": "image_generation",
+                    "images": images_data,
+                    "prompt": request.message,
+                    "count": len(generated_images)
+                }
+            )
         elif intent == "ambiguous":
             clarification_msg = (
                 "Did you want to generate an image or get a text answer? "
-                "Please reply with 'image' or 'text'."
+                "Please reply with \'image\' or \'text\'."
             )
-            context_manager.add_assistant_message(session_id, clarification_msg)
+            await context_manager.add_assistant_message(user_id, session_id, clarification_msg, metadata={"type": "clarification"})
             return ChatResponse(
                 response=clarification_msg,
                 session_id=session_id,
@@ -266,23 +377,77 @@ async def chat(request: ChatRequest, req: Request):
                 )
             except asyncio.TimeoutError:
                 raise HTTPException(status_code=408, detail=f"Request timeout - LLM took longer than {settings.LLAMACPP_TIMEOUT} seconds to respond")
+
+            # --- PATCH: Detect tool action and do real web search ---
+
+            # --- PATCH: Multi-step LLM-tool-LLM orchestration ---
+            max_tool_loops = 2
+            tool_loops = 0
+            llm_content = llm_response.content
+            tool_usage = []
+
+            while tool_loops < max_tool_loops:
+                try:
+                    # Try to parse the response as a JSON tool action
+                    tool_action = json.loads(llm_content)
+                    if isinstance(tool_action, dict) and ("action" in tool_action or "tool" in tool_action):
+                        logger.info(f"Loop {tool_loops + 1}: Detected tool action: {tool_action}")
+                        
+                        # Log the tool action itself as an assistant message
+                        await context_manager.add_assistant_message(user_id, session_id, llm_content, metadata={'type': 'tool_call'})
+                        tool_usage.append(tool_action)
+
+                        # Execute the tool
+                        tool_result = await handle_tool_action(tool_action, request.message, session_id, llm_manager)
+                        logger.info(f"Loop {tool_loops + 1}: Tool result: {tool_result}")
+                        
+                        # Log the tool result as a system/tool message
+                        await context_manager.add_user_message(user_id, session_id, tool_result, metadata={'type': 'tool_result'})
+
+                        # Re-prompt LLM with tool result for a final answer
+                        messages = await _build_llm_messages(
+                            session_id=session_id,
+                            user_message=request.message, # Keep original user message for context
+                            context_manager=context_manager,
+                            rag_service=rag_service if request.include_rag else None,
+                            tool_service=tool_service if request.include_tools else None
+                        )
+                        
+                        # Add the tool result explicitly to the messages for the next turn
+                        messages.append({"role": "system", "content": f"Tool execution result: {tool_result}"})
+
+                        llm_response = await llm_manager.generate_response(
+                            messages=messages,
+                            provider=provider,
+                            temperature=request.temperature,
+                            max_tokens=request.max_tokens
+                        )
+                        llm_content = llm_response.content
+                        tool_loops += 1
+                    else:
+                        # If not a valid tool action, break the loop
+                        break
+                except (json.JSONDecodeError, TypeError):
+                    # If it's not JSON or not a dict, it's the final answer
+                    break
             
-            # Add assistant response to context
-            context_manager.add_assistant_message(session_id, llm_response.content)
-            
-            # Build response
+            # Add the final assistant response to context and persistent history
+            logger.info(f"Final assistant response: {llm_content}")
+            await context_manager.add_assistant_message(user_id, session_id, llm_content)
+
+            # Build and return the final response
             response = ChatResponse(
-                response=llm_response.content,
+                response=llm_content,
                 session_id=session_id,
                 provider=llm_response.provider,
                 model=llm_response.model,
-                usage=llm_response.usage
+                usage=llm_response.usage,
+                tool_usage=tool_usage if tool_usage else None
             )
-            
             return response
-            
+
     except Exception as e:
-        logger.error(f"Chat error: {e}")
+        logger.error(f"Chat error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -300,30 +465,28 @@ async def get_sessions(req: Request):
 
 @router.get("/chat/sessions/{session_id}/history")
 async def get_conversation_history(session_id: str, req: Request, limit: int = 50):
-    """Get conversation history for a session."""
+    """Get conversation history for a session from persistent storage."""
+    logger.info(f"Endpoint /chat/sessions/{session_id}/history called")
     try:
-        context_manager = req.app.state.context_manager
-        
-        context = context_manager.get_context(session_id)
-        if not context:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        messages = context.get_recent_messages(limit)
-        
-        history = ConversationHistory(
-            session_id=session_id,
-            messages=[ChatMessage(**msg) for msg in messages],
-            created_at=context.created_at.isoformat(),
-            last_accessed=context.last_accessed.isoformat(),
-            message_count=len(context.messages)
-        )
-        
-        return history
-        
-    except HTTPException:
-        raise
+        rag_service = req.app.state.rag_service
+        if not rag_service:
+            logger.error("RAG service not available in /chat/sessions/{session_id}/history")
+            raise HTTPException(status_code=503, detail="History service (RAG) not available")
+
+        user_id = "default_user"  # TODO: Replace with real user auth
+        logger.info(f"Fetching history for session_id: {session_id}, user_id: {user_id}")
+        history_messages = await rag_service.get_chat_history(user_id, session_id, limit=limit)
+        logger.info(f"Found {len(history_messages)} messages for session_id: {session_id}")
+
+        # The frontend expects a `history` property containing the messages list.
+        return JSONResponse(content={
+            "session_id": session_id,
+            "history": history_messages, # Changed from `messages` to `history`
+            "message_count": len(history_messages)
+        })
+
     except Exception as e:
-        logger.error(f"Error getting conversation history: {e}")
+        logger.error(f"Error getting conversation history for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -468,7 +631,7 @@ async def stream_chat_v1(
                 context_manager.create_session(session_id)
         
         # Add user message to context
-        context_manager.add_user_message(session_id, message)
+        await context_manager.add_user_message("default_user", session_id, message)
         
         # Build messages for LLM
         messages = await _build_llm_messages(
@@ -503,7 +666,8 @@ async def stream_chat_v1(
                         yield f"event: message\ndata: {json.dumps(message_event)}\n\n"
                 
                 # Add complete response to context after streaming is finished
-                context_manager.add_assistant_message(session_id, full_response)
+                user_id = "default_user" # TODO: Replace with real user auth
+                await context_manager.add_assistant_message(user_id, session_id, full_response)
                 
                 # Send a final event to signal the end of the stream
                 yield "event: end\ndata: {}\n\n"
@@ -587,7 +751,7 @@ async def chat_with_image(
         
         # Add user message to context (with image info)
         user_message_with_image = f"{message} [Image attached: {image.filename}]"
-        context_manager.add_user_message(session_id, user_message_with_image)
+        await context_manager.add_user_message("default_user", session_id, user_message_with_image)
         
         # Build enhanced prompt for image analysis
         image_prompt = f"""The user has shared an image and asked: "{message}"
@@ -685,14 +849,14 @@ async def test_web_search(req: Request, query: str = "latest news"):
 
 
 @router.get("/test-search")
-async def test_search(query: str = Query(...), tool_service: ToolService = Depends(get_tool_service)):
+async def test_search(keyword: str = Query(...), tool_service: ToolService = Depends(get_tool_service)):
     """Test the web search tool directly."""
     import logging
     logger = logging.getLogger("aurapai.websearch")
-    logger.info(f"Test search endpoint called with query: {query}")
+    logger.info(f"Test search endpoint called with query: {keyword}")
     try:
-        results = await tool_service.web_search(query, max_results=3)
-        logger.info(f"Web search returned {len(results) if results else 0} results for query: {query}")
+        results = await tool_service.web_search(keyword, max_results=3)
+        logger.info(f"Web search returned {len(results) if results else 0} results for query: {keyword}")
         return {"results": [r.dict() for r in results]}
     except Exception as e:
         logger.warning(f"Web search failed in /test-search: {e}")
@@ -702,10 +866,10 @@ async def test_search(query: str = Query(...), tool_service: ToolService = Depen
 def estimate_token_count(text: str) -> int:
     """Estimate token count for a text string."""
     try:
-        # Use tiktoken for more accurate token counting
+        import tiktoken
         encoding = tiktoken.get_encoding("cl100k_base")  # GPT-4 encoding
         return len(encoding.encode(text))
-    except:
+    except Exception:
         # Fallback: rough estimation (1 token ≈ 4 characters)
         return len(text) // 4
 
@@ -714,90 +878,39 @@ async def _build_llm_messages(
     session_id: str,
     user_message: str,
     context_manager: ContextManager,
-    rag_service=None,
-    tool_service=None
+    rag_service: Optional[Any],
+    tool_service: Optional["ToolService"],
 ) -> List[Dict[str, str]]:
-    """Build messages for LLM including context and tools."""
-    
+    """Build the list of messages for the LLM, including history, RAG, and tools."""
     messages = []
     
-    # System message with platform context (concise version)
-    system_prompt = """You are Aura-PAI, an AI assistant for code, documentation, and general tasks. You have:
-
-1. Conversation context
-2. Local codebase access (RAG)
-3. Real-time web search (for current info)
-4. URL fetching tools
-
-Guidelines:
-- Provide helpful, accurate responses
-- Explain code changes clearly
-- Use web search for current events/news automatically
-- Be transparent about capabilities
-- Focus on practical advice"""
-    
+    # 1. Add System Prompt (if any)
+    # This can be a static prompt or dynamically generated
+    system_prompt = "You are Auro-PAI, a helpful AI assistant. Your responses should be concise and informative."
     messages.append({"role": "system", "content": system_prompt})
-    
-    # Add conversation history
-    conversation_context = context_manager.build_context_for_llm(session_id)
-    
-    # Add recent conversation messages (excluding current user message)
-    for msg in conversation_context["messages"][:-1]:  # Exclude the just-added user message
-        messages.append({
-            "role": msg["role"],
-            "content": msg["content"]
-        })
-    
-    # Add RAG context if available (optimized)
-    if rag_service and user_message:
-        try:
-            rag_context = await rag_service.get_context_for_query(user_message)
-            if rag_context["context"]:
-                # Truncate RAG context to prevent overflow
-                context_content = rag_context["context"]
-                if len(context_content) > 1000:  # Limit RAG context length
-                    context_content = context_content[:1000] + "...[truncated for length]"
-                rag_message = f"Relevant codebase context:\n{context_content}"
-                messages.append({"role": "system", "content": rag_message})
-        except Exception as e:
-            logger.warning(f"RAG context retrieval failed: {e}")
-    
-    # Add web search context for time-sensitive queries (optimized)
-    if tool_service and await _should_search_web(user_message):
-        logger.info(f"Web search triggered for query: {user_message}")
-        try:
-            search_results = await tool_service.web_search(user_message, max_results=3)  # Reduced from 5 to 3
-            logger.info(f"Web search results: {search_results}")
-            if search_results:
-                # Create more concise web context
-                web_context = "Recent web search results:\n"
-                for i, result in enumerate(search_results[:3], 1):
-                    # Truncate long snippets
-                    snippet = result.snippet[:150] + "..." if len(result.snippet) > 150 else result.snippet
-                    web_context += f"{i}. {result.title}\n{snippet}\nSource: {result.url}\n\n"
-                messages.append({"role": "system", "content": web_context})
-                logger.info(f"Added web search context for query: {user_message}")
-            else:
-                logger.warning(f"Web search returned no results for query: {user_message}")
-        except Exception as e:
-            logger.warning(f"Web search failed: {e}")
-    
-    # Add tool availability context
+
+    # 2. Retrieve Chat History from ChromaDB
+    user_id = "default_user" # TODO: Replace with real user auth
+    if rag_service:
+        history = await rag_service.get_chat_history(user_id, session_id, limit=10) # Get last 10 messages
+        for msg in history:
+            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+
+    # 3. Add RAG Context (if enabled)
+    if rag_service:
+        rag_context = await rag_service.get_context_for_query(user_message)
+        if rag_context and rag_context.get("context"): 
+            messages.append({"role": "system", "content": f"Relevant Information:\n{rag_context['context']}"}) 
+
+    # 4. Add Tool Definitions (if enabled)
     if tool_service:
-        try:
-            available_tools = await tool_service.get_available_tools()
-            if available_tools["available_tools"]:
-                tools_message = f"Available tools: {', '.join(available_tools['available_tools'])}"
-                messages.append({"role": "system", "content": tools_message})
-        except Exception as e:
-            logger.warning(f"Tool availability check failed: {e}")
-    
-    # Add current user message
+        tool_definitions = tool_service.get_tool_definitions()
+        if tool_definitions:
+            messages.append({"role": "system", "content": f"Available Tools:\n{json.dumps(tool_definitions, indent=2)}"})
+
+    # 5. Add the current user message
     messages.append({"role": "user", "content": user_message})
-    
-    # Truncate context to stay within token limits
-    messages = truncate_context_to_limit(messages, max_tokens=4096)
-    
+
     return messages
 
 
@@ -824,7 +937,8 @@ async def _stream_chat_response(
             yield chunk
         
         # Add complete response to context
-        context_manager.add_assistant_message(session_id, full_response)
+        user_id = "default_user" # TODO: Replace with real user auth
+        await context_manager.add_assistant_message(user_id, session_id, full_response)
         
     except Exception as e:
         logger.error(f"Streaming error: {e}")
@@ -954,125 +1068,6 @@ They have shared an image. Please analyze this image and respond to their questi
     return messages
 
 
-@router.post("/chat/generate-images")
-async def generate_images_from_menu(
-    req: Request,
-    message: str = Form(...),
-    image: UploadFile = File(...),
-    style: str = Form("photorealistic"),
-    max_dishes: int = Form(5),
-    provider: Optional[str] = Form(None)
-):
-    """Generate images of dishes from a menu photo."""
-    try:
-        # Get services from app state
-        llm_manager = req.app.state.llm_manager
-        context_manager = req.app.state.context_manager
-        image_gen_service = getattr(req.app.state, 'image_generation_service', None)
-        
-        if not image_gen_service:
-            raise HTTPException(status_code=503, detail="Image generation service not available")
-        
-        # Process uploaded menu image
-        image_data = await image.read()
-        pil_image = Image.open(io.BytesIO(image_data))
-        
-        # Resize if too large
-        if pil_image.width > 1024 or pil_image.height > 1024:
-            pil_image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-        
-        # Convert to base64
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format='JPEG', quality=85)
-        image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        
-        # Extract dishes from menu using LLM
-        extraction_prompt = f"""
-Analyze this menu image and extract dish information. For each dish, provide:
-1. Dish name
-2. Brief description
-3. Price (if visible)
-
-Format as JSON list:
-[{{"name": "dish name", "description": "brief description", "price": "price"}}]
-
-User request: {message}
-Image: data:image/jpeg;base64,{image_base64}
-"""
-        
-        # Get dish list from LLM
-        llm_response = await llm_manager.generate_response(
-            messages=[{"role": "user", "content": extraction_prompt}],
-            max_tokens=1000
-        )
-        
-        # Parse dishes (you'd want more robust JSON parsing here)
-        try:
-            import json
-            import re
-            json_match = re.search(r'\[.*\]', llm_response.content, re.DOTALL)
-            if json_match:
-                dishes = json.loads(json_match.group())
-            else:
-                # Fallback: simple extraction
-                dishes = [{"name": "Sample Dish", "description": "Delicious food item"}]
-        except:
-            dishes = [{"name": "Sample Dish", "description": "Delicious food item"}]
-        
-        # Limit number of dishes
-        dishes = dishes[:max_dishes]
-        
-        # Generate images for each dish
-        generated_images = await image_gen_service.generate_multiple_dishes(
-            dishes=dishes,
-            style=style,
-            provider=provider
-        )
-        
-        return {
-            "success": True,
-            "message": f"Generated images for {len(generated_images)} dishes",
-            "dishes": dishes,
-            "generated_images": generated_images,
-            "style": style,
-            "provider": provider or "default"
-        }
-        
-    except Exception as e:
-        logger.error(f"Image generation error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/chat/generate-single-dish")
-async def generate_single_dish_image(
-    req: Request,
-    dish_name: str = Form(...),
-    description: str = Form(""),
-    style: str = Form("photorealistic"),
-    provider: Optional[str] = Form(None)
-):
-    """Generate image of a single dish by name and description."""
-    try:
-        image_gen_service = getattr(req.app.state, 'image_generation_service', None)
-        
-        if not image_gen_service:
-            raise HTTPException(status_code=503, detail="Image generation service not available")
-        
-        # Generate image
-        result = await image_gen_service.generate_dish_image(
-            dish_name=dish_name,
-            description=description,
-            style=style,
-            provider=provider
-        )
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Single dish generation error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.post("/chat/generate-image")
 async def generate_image(
     req: Request,
@@ -1103,7 +1098,7 @@ async def generate_image(
                 context_manager.create_session(session_id)
         
         # Add user request to context
-        context_manager.add_user_message(session_id, f"Generate image: {prompt}")
+        await context_manager.add_user_message("default_user", session_id, f"Generate image: {prompt}")
         
         # Generate images
         generated_images = await image_service.generate_image(
@@ -1135,3 +1130,74 @@ async def generate_image(
     except Exception as e:
         logger.error(f"Image generation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/chat/history", summary="Get Chat History")
+async def get_chat_history(
+    req: Request, 
+    session_id: Optional[str] = None, 
+    limit: int = 50, 
+    keyword: Optional[str] = None
+):
+    """Retrieve user chat history from ChromaDB."""
+    # Privacy/access control stub: in single-user mode, user_id is fixed
+    user_id = "default_user"  # TODO: replace with real user auth
+    rag_service = req.app.state.rag_service
+    if not rag_service:
+        raise HTTPException(status_code=503, detail="RAG service not available")
+    # Ensure 'keyword' is passed to get_chat_history
+    history = await rag_service.get_chat_history(user_id, session_id, limit, keyword)
+    return {"history": history}
+
+@router.delete("/chat/history", summary="Delete Chat History")
+async def delete_chat_history(req: Request, session_id: Optional[str] = None):
+    """Delete user chat history from ChromaDB."""
+    user_id = "default_user"  # TODO: replace with real user auth
+    rag_service = req.app.state.rag_service
+    if not rag_service:
+        raise HTTPException(status_code=503, detail="RAG service not available")
+    deleted_count = await rag_service.delete_chat_history(user_id, session_id)
+    return {"deleted_messages": deleted_count}
+
+@router.get("/chat/history/export", summary="Export Chat History")
+async def export_chat_history(req: Request, session_id: Optional[str] = None):
+    """Export user chat history from ChromaDB."""
+    user_id = "default_user"  # TODO: replace with real user auth
+    rag_service = req.app.state.rag_service
+    if not rag_service:
+        raise HTTPException(status_code=503, detail="RAG service not available")
+    export = await rag_service.export_chat_history(user_id, session_id)
+    return {"export_data": export}
+
+
+@router.get("/tools", summary="List available tools")
+async def list_tools(req: Request):
+    """List all available tools and their schemas."""
+    tool_service = req.app.state.tool_service
+    return {"tools": tool_service.get_tool_definitions()}
+
+class ToolInvokeRequest(BaseModel):
+    tool_name: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+@router.post("/tools/invoke", summary="Invoke a tool")
+async def invoke_tool(request: ToolInvokeRequest, req: Request):
+    """Invoke a tool by name with parameters (including image tools)."""
+    tool_service = req.app.state.tool_service
+    image_service = getattr(req.app.state, 'image_generation_service', None)
+    try:
+        result = await tool_service.invoke_tool(request.tool_name, request.params, image_service=image_service)
+        return JSONResponse(content={"success": True, "result": result})
+    except NotImplementedError as e:
+        return JSONResponse(content={"success": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
+
+@router.get("/history/{session_id}", response_model=List[Dict[str, Any]])
+async def get_chat_history(request: Request, session_id: str, limit: int = 100):
+    """Retrieve chat history for a given session."""
+    context_manager = request.app.state.context_manager
+    history = await context_manager.get_conversation_history(session_id, limit)
+    if not history:
+        raise HTTPException(status_code=404, detail="Session not found or no history available.")
+    return history

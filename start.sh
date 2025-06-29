@@ -107,8 +107,19 @@ check_chromadb() {
     if curl -s "http://$CHROMADB_HOST:$CHROMADB_PORT/api/v1/heartbeat" > /dev/null 2>&1; then
         print_success "ChromaDB server is running"
     else
-        print_warning "ChromaDB server not accessible (will use in-memory mode)"
-        print_warning "To start ChromaDB server: chroma run --host $CHROMADB_HOST --port $CHROMADB_PORT"
+        print_warning "ChromaDB server not accessible."
+        if command -v chroma &> /dev/null; then
+            print_status "Attempting to start ChromaDB server in the background..."
+            chroma run --host "$CHROMADB_HOST" --port "$CHROMADB_PORT" &
+            sleep 5 # Give the server a moment to start
+            if curl -s "http://$CHROMADB_HOST:$CHROMADB_PORT/api/v1/heartbeat" > /dev/null 2>&1; then
+                print_success "ChromaDB server started successfully."
+            else
+                print_error "Failed to start ChromaDB server. Please start it manually."
+            fi
+        else
+            print_error "ChromaDB is not installed or not in PATH. Please install it with 'pip install chromadb'"
+        fi
     fi
 }
 

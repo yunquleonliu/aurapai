@@ -323,3 +323,76 @@ class ToolService:
             "available_tools": list(tools.keys()),
             "tools": tools
         }
+    
+    def get_tool_definitions(self):
+        """Return a summary of available tools and their parameters for LLM prompt injection."""
+        tools = []
+        if getattr(settings, 'WEB_SEARCH_ENABLED', False):
+            tools.append({
+                "name": "web_search",
+                "description": "Search the web for information",
+                "parameters": [
+                    {"name": "query", "type": "string", "description": "Search query string"},
+                    {"name": "max_results", "type": "int", "description": "Maximum number of results (default: 5)"},
+                    {"name": "safe_search", "type": "bool", "description": "Enable safe search (default: true)"}
+                ]
+            })
+        tools.append({
+            "name": "fetch_url",
+            "description": "Fetch content from a specific URL",
+            "parameters": [
+                {"name": "url", "type": "string", "description": "URL to fetch"},
+                {"name": "extract_text", "type": "bool", "description": "Extract readable text from HTML (default: true)"},
+                {"name": "max_size", "type": "int", "description": f"Maximum content size in bytes (default: {getattr(settings, 'URL_FETCH_MAX_SIZE', 1024*1024)})"}
+            ]
+        })
+        tools.append({
+            "name": "search_and_fetch",
+            "description": "Search web and fetch content from top results",
+            "parameters": [
+                {"name": "query", "type": "string", "description": "Search query string"},
+                {"name": "fetch_top_results", "type": "int", "description": "Number of top results to fetch content from (default: 2)"},
+                {"name": "max_search_results", "type": "int", "description": "Maximum search results (default: 5)"}
+            ]
+        })
+        # --- Add image generation/interpretation tools ---
+        tools.append({
+            "name": "generate_image",
+            "description": "Generate an image from a text prompt using AI image models.",
+            "parameters": [
+                {"name": "prompt", "type": "string", "description": "Text prompt for image generation."},
+                {"name": "provider", "type": "string", "description": "Image model/provider (optional)"},
+                {"name": "size", "type": "string", "description": "Image size, e.g. 1024x1024 (optional)"},
+                {"name": "style", "type": "string", "description": "Image style, e.g. photorealistic (optional)"},
+                {"name": "num_images", "type": "int", "description": "Number of images to generate (default: 1)"}
+            ]
+        })
+        tools.append({
+            "name": "interpret_image",
+            "description": "Interpret or analyze an uploaded image (OCR, description, etc).",
+            "parameters": [
+                {"name": "image_base64", "type": "string", "description": "Base64-encoded image data."},
+                {"name": "task", "type": "string", "description": "Analysis task, e.g. 'describe', 'ocr', 'detect_objects' (optional)"}
+            ]
+        })
+        return tools
+
+    async def invoke_tool(self, tool_name: str, params: dict, image_service=None) -> dict:
+        """Invoke a tool by name with parameters. Supports image tools if image_service is provided."""
+        if tool_name == "generate_image":
+            if not image_service:
+                raise RuntimeError("Image service not available")
+            prompt = params.get("prompt")
+            provider = params.get("provider")
+            size = params.get("size", "1024x1024")
+            style = params.get("style")
+            num_images = int(params.get("num_images", 1))
+            images = await image_service.generate_image(prompt, provider, size, style, num_images)
+            return {"images": [img.to_dict() for img in images]}
+        elif tool_name == "interpret_image":
+            # Placeholder: implement actual image interpretation logic
+            image_base64 = params.get("image_base64")
+            task = params.get("task", "describe")
+            # For now, just echo back
+            return {"result": f"Interpreted image with task '{task}' (not yet implemented)", "image_base64": image_base64}
+        raise NotImplementedError(f"Tool '{tool_name}' not implemented or not available.")
