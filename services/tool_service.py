@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 import re
 from datetime import datetime
 
+from services.image_generation_service import ImageGenerationService
+
 try:
     from duckduckgo_search import DDGS
     DUCKDUCKGO_AVAILABLE = True
@@ -70,9 +72,10 @@ class URLFetchResult:
 class ToolService:
     """Manages external tool capabilities for AI assistance."""
     
-    def __init__(self):
+    def __init__(self, image_generation_service: ImageGenerationService):
         self.session: Optional[aiohttp.ClientSession] = None
         self.ddgs: Optional[DDGS] = None
+        self.image_generation_service = image_generation_service
         
     async def initialize(self):
         """Initialize the tool service."""
@@ -98,8 +101,7 @@ class ToolService:
         """Cleanup resources."""
         if self.session:
             await self.session.close()
-        logger.info("Tool Service cleaned up")
-    
+
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check on tool service."""
         capabilities = {
@@ -375,24 +377,48 @@ class ToolService:
                 {"name": "task", "type": "string", "description": "Analysis task, e.g. 'describe', 'ocr', 'detect_objects' (optional)"}
             ]
         })
+        tools.append(
+            {
+                "name": "clarification",
+                "description": "Asks the user for more information when the query is ambiguous or incomplete.",
+                "arguments": {
+                    "question": {"type": "string", "description": "The question to ask the user."}
+                }
+            }
+        )
         return tools
 
-    async def invoke_tool(self, tool_name: str, params: dict, image_service=None) -> dict:
-        """Invoke a tool by name with parameters. Supports image tools if image_service is provided."""
-        if tool_name == "generate_image":
-            if not image_service:
-                raise RuntimeError("Image service not available")
-            prompt = params.get("prompt")
-            provider = params.get("provider")
-            size = params.get("size", "1024x1024")
-            style = params.get("style")
-            num_images = int(params.get("num_images", 1))
-            images = await image_service.generate_image(prompt, provider, size, style, num_images)
-            return {"images": [img.to_dict() for img in images]}
-        elif tool_name == "interpret_image":
-            # Placeholder: implement actual image interpretation logic
-            image_base64 = params.get("image_base64")
-            task = params.get("task", "describe")
-            # For now, just echo back
-            return {"result": f"Interpreted image with task '{task}' (not yet implemented)", "image_base64": image_base64}
-        raise NotImplementedError(f"Tool '{tool_name}' not implemented or not available.")
+    async def invoke_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+        """Dynamically invoke a tool by its name."""
+        logger.info(f"Invoking tool: {tool_name} with args: {arguments}")
+        
+        tool_map = {
+            "web_search": self.web_search,
+            "fetch_url": self.fetch_url_content,
+            "clarification": self.clarification_tool,
+            "search_and_fetch": self.search_and_fetch,
+            "generate_image": self.image_generation_service.generate_image_tool,
+            "interpret_image": self.image_generation_service.interpret_image_tool,
+        }
+        
+        if tool_name not in tool_map:
+            raise NotImplementedError(f"Tool '{tool_name}' is not implemented.")
+            
+        tool_method = tool_map[tool_name]
+        
+        # Validate arguments
+        # This is a simple validation. For production, use Pydantic models.
+        # ... (argument validation logic can be added here)
+
+        try:
+            if asyncio.iscoroutinefunction(tool_method):
+                return await tool_method(**arguments)
+            else:
+                return tool_method(**arguments)
+        except Exception as e:
+            logger.error(f"Error invoking tool {tool_name}: {e}", exc_info=True)
+            raise
+
+    async def clarification_tool(self, question: str) -> Dict[str, str]:
+        """A dummy tool that represents asking for clarification."""
+        return {"clarification_question": question}

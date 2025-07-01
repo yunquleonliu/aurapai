@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     APP_NAME: str = "Aura-PAI Platform Backend"
     VERSION: str = "1.0.0"
     DEBUG: bool = False
+    RELOAD: bool = True
+    API_V1_STR: str = "/api/v1"
     HOST: str = "0.0.0.0"
     PORT: int = 8001
     
@@ -52,12 +54,13 @@ class Settings(BaseSettings):
     WEB_SEARCH_ENGINE: str = "duckduckgo"
     WEB_SEARCH_MAX_RESULTS: int = 10
     URL_FETCH_TIMEOUT: int = 30
-    URL_FETCH_MAX_SIZE: int = 1024 * 1024  # 1MB
+    URL_FETCH_MAX_SIZE: int = 1048576
     
     # Context Management
     MAX_CONTEXT_LENGTH: int = 8192
     MAX_SESSIONS: int = 100
-    SESSION_TIMEOUT: int = 3600  # 1 hour in seconds
+    SESSION_TIMEOUT: int = 3600
+    SESSION_CLEANUP_INTERVAL: int = 600  # 10 minutes
     
     # File processing
     SUPPORTED_FILE_TYPES: List[str] = [

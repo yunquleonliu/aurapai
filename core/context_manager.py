@@ -22,6 +22,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class MultiStepTask:
+    """Represents a multi-step task or plan."""
+    def __init__(self, original_query: str, plan: List[Dict[str, Any]]):
+        self.original_query = original_query
+        self.plan = plan
+        self.current_step = 0
+        self.status = "in_progress"  # in_progress, completed, failed
+        self.step_results: Dict[int, Any] = {}
+
+    def get_next_step(self):
+        if self.current_step < len(self.plan):
+            return self.plan[self.current_step]
+        return None
+
+    def complete_step(self, result: Any):
+        self.step_results[self.current_step] = result
+        self.current_step += 1
+        if self.current_step >= len(self.plan):
+            self.status = "completed"
+
+    def is_finished(self) -> bool:
+        """Check if the task is completed or failed."""
+        return self.status in ["completed", "failed"]
+
+    def to_dict(self):
+        return {
+            "original_query": self.original_query,
+            "plan": self.plan,
+            "current_step": self.current_step,
+            "status": self.status,
+            "step_results": self.step_results,
+        }
+
+
 class ConversationContext:
     """Represents a single conversation context."""
     
@@ -32,7 +66,7 @@ class ConversationContext:
         self.metadata: Dict[str, Any] = {}
         self.rag_context: List[Dict[str, Any]] = []
         self.tool_usage_history: List[Dict[str, Any]] = []
-        self.current_task: Optional[str] = None
+        self.current_task: Optional[MultiStepTask] = None # Changed from str to MultiStepTask
         self.messages: List[Dict[str, Any]] = []  # Store chat messages
     
     def init(self):
@@ -74,7 +108,7 @@ class ConversationContext:
             "session_id": self.session_id,
             "rag_contexts": len(self.rag_context),
             "tool_usage_count": len(self.tool_usage_history),
-            "current_task": self.current_task,
+            "current_task": self.current_task.to_dict() if self.current_task else None,
             "last_accessed": self.last_accessed.isoformat()
         }
     
@@ -193,7 +227,7 @@ class ContextManager:
         
         result = {
             "messages": context.get_recent_messages(),
-            "current_task": context.current_task
+            "current_task": context.current_task.to_dict() if context.current_task else None
         }
         
         if include_rag:
@@ -204,11 +238,18 @@ class ContextManager:
         
         return result
     
-    def set_current_task(self, session_id: str, task: str):
+    def set_current_task(self, session_id: str, task: MultiStepTask):
         """Set the current task for a session."""
         context = self.get_context(session_id)
         if context:
             context.current_task = task
+
+    def get_current_task(self, session_id: str) -> Optional[MultiStepTask]:
+        """Get the current task for a session."""
+        context = self.get_context(session_id)
+        if context:
+            return context.current_task
+        return None
 
     def get_session_stats(self) -> List[Dict[str, Any]]:
         """Get statistics for all active sessions."""
@@ -218,7 +259,7 @@ class ContextManager:
                 "created_at": c.created_at.isoformat(),
                 "last_accessed": c.last_accessed.isoformat(),
                 "message_count": len(c.messages),
-                "current_task": c.current_task
+                "current_task": c.current_task.to_dict() if c.current_task else None
             }
             for c in self.contexts.values()
         ]

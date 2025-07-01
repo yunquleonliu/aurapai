@@ -14,7 +14,7 @@ import logging
 from typing import Dict, Any
 
 from core.config import settings
-from api.routes import chat, rag, tools, health
+from api.routes import chat # Only import the main chat router
 from services.llm_manager import LLMManager
 from services.rag_service import RAGService
 from services.tool_service import ToolService
@@ -54,11 +54,11 @@ async def lifespan(app: FastAPI):
         rag_service = RAGService()
         await rag_service.initialize()
         
-        tool_service = ToolService()
-        await tool_service.initialize()
-        
         image_generation_service = ImageGenerationService()
         await image_generation_service.initialize()
+
+        tool_service = ToolService(image_generation_service=image_generation_service)
+        await tool_service.initialize()
         
         context_manager = ContextManager(rag_service)
         await context_manager.initialize()
@@ -98,12 +98,15 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(
     title="Aura-PAI Platform Backend",
-    description="AI assistance platform with local LLM, RAG, and tool integration",
+    description="Central coordinator for the Auro-PAI platform, providing AI assistance with context-aware, transparent, and controllable capabilities.",
     version="1.0.0",
     lifespan=lifespan
 )
 
-# Add CORS middleware
+# Mount static files directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
@@ -112,58 +115,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files directory
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Include API routes
-app.include_router(health.router, prefix="/api/v1", tags=["health"])
-app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
-app.include_router(rag.router, prefix="/api/v1", tags=["rag"])
-app.include_router(tools.router, prefix="/api/v1", tags=["tools"])
+# Include only the primary chat router
+app.include_router(chat.router, prefix=settings.API_V1_STR, tags=["Chat"])
 
 
-@app.get("/", response_class=FileResponse)
+@app.get("/", include_in_schema=False)
 async def root():
     """Serve the main chat interface."""
     return FileResponse("static/index.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
-@app.get("/api/v1/status")
-async def status():
-    """Get overall platform status."""
-    try:
-        status_info = {
-            "platform": "healthy",
-            "services": {}
-        }
-        
-        # Check LLM service
-        if app.state.llm_manager:
-            llm_status = await app.state.llm_manager.health_check()
-            status_info["services"]["llm"] = llm_status
-        
-        # Check RAG service
-        if app.state.rag_service:
-            rag_status = await app.state.rag_service.health_check()
-            status_info["services"]["rag"] = rag_status
-        
-        # Check Tool service
-        if app.state.tool_service:
-            tool_status = await app.state.tool_service.health_check()
-            status_info["services"]["tools"] = tool_status
-        
-        return status_info
-        
-    except Exception as e:
-        logger.error(f"Status check failed: {e}")
-        raise HTTPException(status_code=500, detail="Status check failed")
-
-
 if __name__ == "__main__":
+    logger.info(f"Starting server, listening on {settings.HOST}:{settings.PORT}")
     uvicorn.run(
-        "main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=settings.DEBUG,
-        log_level="info"
+        "main:app", 
+        host=settings.HOST, 
+        port=settings.PORT, 
+        reload=settings.RELOAD
     )

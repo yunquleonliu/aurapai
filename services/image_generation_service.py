@@ -141,6 +141,15 @@ class ImageGenerationService:
                 return await self._generate_placeholder(prompt, size, num_images)
             raise
     
+    async def generate_image_tool(self, *args, **kwargs):
+        """Wrapper for tool invocation."""
+        return await self.generate_image(*args, **kwargs)
+
+    async def interpret_image_tool(self, *args, **kwargs):
+        """Placeholder for image interpretation tool."""
+        logger.warning("interpret_image_tool is not fully implemented.")
+        return {"analysis": "Image interpretation is not yet available."}
+
     async def _generate_with_dalle(self, prompt: str, size: str, num_images: int) -> List[GeneratedImage]:
         """Generate images using OpenAI DALL-E."""
         try:

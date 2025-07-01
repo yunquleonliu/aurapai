@@ -239,83 +239,51 @@ document.addEventListener("DOMContentLoaded", () => {
                 imageInput.value = '';
 
             } else {
-                // Handle text-only streaming
-                const params = new URLSearchParams({
+                // Handle text-only request (non-streaming)
+                const payload = {
                     message: message,
-                    session_id: sessionId || '',
-                    include_rag: true,
-                    include_tools: true,
-                    temperature: 0.7,
-                });
-
-                currentEventSource = new EventSource(`/api/v1/chat/stream?${params.toString()}`);
-                let assistantMessageDiv = null;
-                let fullResponse = "";
-
-                // Listener for the session_start event
-                currentEventSource.addEventListener('session_start', function(event) {
-                    const data = JSON.parse(event.data);
-                    sessionId = data.session_id;
-                    saveSession(sessionId, message);
-                    console.log("Session started:", sessionId);
-                });
-
-                // Listener for incoming message chunks
-                currentEventSource.addEventListener('message', function(event) {
-                    removeTypingIndicator();
-                    const data = JSON.parse(event.data);
-
-                    if (!assistantMessageDiv) {
-                        assistantMessageDiv = createMessageDiv("assistant");
-                        messagesContainer.appendChild(assistantMessageDiv);
-                    }
-
-                    fullResponse += data.content;
-                    assistantMessageDiv.textContent = fullResponse;
-                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
-                });
-
-                // Listener for the end of the stream
-                currentEventSource.addEventListener('end', function(event) {
-                    console.log("Stream ended.");
-                    currentEventSource.close();
-                    currentEventSource = null;
-                    stopButton.style.display = 'none';
-                    sendButton.style.display = 'flex';
-                });
-
-                // Listener for any errors from the stream
-                currentEventSource.addEventListener('error', function(event) {
-                    try {
-                        const data = JSON.parse(event.data);
-                        console.error("Stream error:", data.error);
-                        removeTypingIndicator();
-                        appendMessage(`Server Error: ${data.error}`, "assistant", true);
-                    } catch (e) {
-                        console.error("Stream parse error:", e);
-                    }
-                    currentEventSource.close();
-                    currentEventSource = null;
-                    stopButton.style.display = 'none';
-                    sendButton.style.display = 'flex';
-                });
-
-                // General error handler for the EventSource connection itself
-                currentEventSource.onerror = function(err) {
-                    console.error("EventSource failed:", err);
-                    removeTypingIndicator();
-                    if (!fullResponse) {
-                        appendMessage("Error: Could not connect to the server for streaming.", "assistant", true);
-                    }
-                    if (currentEventSource) {
-                        currentEventSource.close();
-                        currentEventSource = null;
-                    }
-                    stopButton.style.display = 'none';
-                    sendButton.style.display = 'flex';
+                    session_id: sessionId || null,
+                    user_id: "default_user" 
                 };
-            }
 
+                try {
+                    const response = await fetch('/api/v1/chat', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
+                        body: JSON.stringify(payload)
+                    });
+
+                    removeTypingIndicator();
+                    stopButton.style.display = 'none';
+                    sendButton.style.display = 'flex';
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.detail || "An unknown error occurred with the chat endpoint.");
+                    }
+
+                    const data = await response.json();
+                    
+                    if (data.session_id) {
+                        sessionId = data.session_id;
+                        if (!sessionList.querySelector(`[data-session-id="${sessionId}"]`)) {
+                             saveSession(sessionId, message);
+                        }
+                    }
+
+                    appendMessage(data.response, "assistant");
+
+                } catch (error) {
+                    console.error("Chat request error:", error);
+                    removeTypingIndicator();
+                    appendMessage(`Error: ${error.message}`, "assistant", true);
+                    stopButton.style.display = 'none';
+                    sendButton.style.display = 'flex';
+                }
+            }
         } catch (error) {
             console.error("Error:", error);
             removeTypingIndicator();
