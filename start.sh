@@ -148,6 +148,9 @@ start_server() {
     print_status ""
     print_status "Press Ctrl+C to stop the server"
     
+    # Set the agent mode directly to ensure it runs as ReAct
+    export AGENT_MODE="ReAct"
+
     # Start with uvicorn for development, or python main.py
     if command -v uvicorn &> /dev/null; then
         uvicorn main:app --host 0.0.0.0 --port ${SERVER_PORT} --reload

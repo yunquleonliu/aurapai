@@ -27,13 +27,18 @@ class Settings(BaseSettings):
     LLAMACPP_MODEL_NAME: str = "mixtral-8x7b-instruct"
     LLAMACPP_TIMEOUT: int = 300
     
+    # Agent Settings
+    AGENT_MODE: str = "ReAct"  # Options: "Plan-and-Execute", "ReAct"
+    
     # Alternative LLM providers
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4"
     
+    # Gemini API and model settings (must match .env if set there)
     GEMINI_API_KEY: Optional[str] = None
-    GEMINI_MODEL: str = "gemini-pro"
-    
+    GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_IMAGE_MODEL: str = "gemini-1.5-flash"
+
     # Image Generation Settings
     HUGGINGFACE_API_KEY: Optional[str] = None
     IMAGE_GENERATION_ENABLED: bool = True

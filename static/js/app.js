@@ -1,4 +1,52 @@
 document.addEventListener("DOMContentLoaded", () => {
+    const publicSendButton = document.getElementById("public-send-button");
+    // --- Public Send Button Handler ---
+    publicSendButton.addEventListener("click", async () => {
+        const message = input.value.trim();
+        if (!message) return;
+        appendMessage(message, "user");
+        input.value = "";
+        showTypingIndicator();
+        sendButton.style.display = 'none';
+        stopButton.style.display = 'flex';
+        try {
+            const payload = {
+                message: message,
+                session_id: sessionId || null,
+                user_id: "default_user",
+                use_public_llm: true
+            };
+            const response = await fetch('/api/v1/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+            removeTypingIndicator();
+            stopButton.style.display = 'none';
+            sendButton.style.display = 'flex';
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || "An unknown error occurred with the public LLM endpoint.");
+            }
+            const data = await response.json();
+            if (data.session_id) {
+                sessionId = data.session_id;
+                if (!sessionList.querySelector(`[data-session-id="${sessionId}"]`)) {
+                    saveSession(sessionId, message);
+                }
+            }
+            appendMessage(data.response, "assistant");
+        } catch (error) {
+            console.error("Public LLM request error:", error);
+            removeTypingIndicator();
+            appendMessage(`Error: ${error.message}`, "assistant", true);
+            stopButton.style.display = 'none';
+            sendButton.style.display = 'flex';
+        }
+    });
     // WeChat browser detection
     if (navigator.userAgent.toLowerCase().indexOf('micromessenger') > -1) {
         document.body.classList.add('wechat-webview');
@@ -14,7 +62,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const imagePreview = document.getElementById("image-preview");
     const previewImg = document.getElementById("preview-img");
     const removeImageButton = document.getElementById("remove-image");
-    const generateButton = document.getElementById("generate-button");
+    // const generateButton = document.getElementById("generate-button"); // Removed
     const sessionList = document.getElementById("session-list");
     const clearHistoryButton = document.getElementById("clear-history-button");
     const menuIcon = document.getElementById('menu-icon');
@@ -43,11 +91,15 @@ document.addEventListener("DOMContentLoaded", () => {
     loadSessions();
 
     clearHistoryButton.addEventListener("click", () => {
-        // For now, we'll just clear the local storage and the list
-        localStorage.removeItem("chat_sessions");
-        sessionList.innerHTML = "";
+        // Only clear the current session's history, not all sessions
+        if (!sessionId) return;
+        let sessions = JSON.parse(localStorage.getItem("chat_sessions")) || [];
+        let session = sessions.find(s => s.id === sessionId);
+        if (session) {
+            session.history = [];
+            localStorage.setItem("chat_sessions", JSON.stringify(sessions));
+        }
         messagesContainer.innerHTML = "";
-        sessionId = null;
         appendMessage("Hello! I am Aura-PAI. How can I assist you today? You can also attach images for visual analysis.", "assistant");
     });
 
@@ -261,20 +313,100 @@ document.addEventListener("DOMContentLoaded", () => {
                     sendButton.style.display = 'flex';
 
                     if (!response.ok) {
-                        const errorData = await response.json();
-                        throw new Error(errorData.detail || "An unknown error occurred with the chat endpoint.");
-                    }
 
-                    const data = await response.json();
-                    
-                    if (data.session_id) {
-                        sessionId = data.session_id;
-                        if (!sessionList.querySelector(`[data-session-id="${sessionId}"]`)) {
-                             saveSession(sessionId, message);
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || "An unknown error occurred with the chat endpoint.");
+                }
+
+                const data = await response.json();
+
+                if (data.session_id) {
+                    sessionId = data.session_id;
+                    if (!sessionList.querySelector(`[data-session-id="${sessionId}"]`)) {
+                         saveSession(sessionId, message);
+                    }
+                }
+
+                // PATCH: Render image or video if present in tool_usage
+                if (
+                    data.tool_usage &&
+                    data.tool_usage.length > 0 &&
+                    data.tool_usage[0].result
+                ) {
+                    const result = data.tool_usage[0].result;
+                    if (result.type === "image") {
+                        // Prefer image_url, fallback to base64_data
+                        let imgHtml = "";
+                        if (result.image_url) {
+                            imgHtml = `<img src="${result.image_url}" alt="${result.message || 'Generated image'}" class="message-image">`;
+                        } else if (result.base64_data) {
+                            imgHtml = `<img src="data:image/png;base64,${result.base64_data}" alt="${result.message || 'Generated image'}" class="message-image">`;
+                        } else {
+                            imgHtml = `<span>[Image data unavailable]</span>`;
                         }
+                        let htmlContent = imgHtml;
+                        if (result.message) {
+                            htmlContent += `<div class="image-caption">${result.message}</div>`;
+                        }
+                        appendMessage(htmlContent, "assistant", false, null, true);
+                        return;
                     }
+                    if (result.type === "video" && result.video_url) {
+                        appendMessage(
+                            `<video controls src="${result.video_url}" style="max-width: 400px; border-radius: 8px; margin: 5px;"></video>`,
+                            "assistant",
+                            false,
+                            null,
+                            true
+                        );
+                        if (result.message) {
+                            appendMessage(result.message, "assistant");
+                        }
+                        return;
+                    }
+                    if (result.type === "clarification" && result.message) {
+                        appendMessage(result.message, "assistant");
+                        return;
+                    }
+                }
 
-                    appendMessage(data.response, "assistant");
+                // PATCH: Render image if present in data.response (for ReAct agent direct tool return)
+
+                if (
+                    data.response &&
+                    typeof data.response === "object"
+                ) {
+                    // Handle image
+                    if (data.response.type === "image") {
+                        let imgHtml = "";
+                        if (data.response.image_url) {
+                            imgHtml = `<img src="${data.response.image_url}" alt="${data.response.message || 'Generated image'}" class="message-image">`;
+                        } else if (data.response.base64_data) {
+                            imgHtml = `<img src="data:image/png;base64,${data.response.base64_data}" alt="${data.response.message || 'Generated image'}" class="message-image">`;
+                        } else {
+                            imgHtml = `<span>[Image data unavailable]</span>`;
+                        }
+                        let htmlContent = imgHtml;
+                        if (data.response.message) {
+                            htmlContent += `<div class="image-caption">${data.response.message}</div>`;
+                        }
+                        appendMessage(htmlContent, "assistant", false, null, true);
+                        return;
+                    }
+                    // Handle web_search
+                    if (data.response.type === "web_search" && Array.isArray(data.response.results || data.response.search_results)) {
+                        const results = data.response.results || data.response.search_results;
+                        let htmlContent = `<div class="web-search-results"><b>Web search results:</b><ul style='padding-left: 18px;'>`;
+                        results.slice(0, 5).forEach(r => {
+                            htmlContent += `<li style='margin-bottom: 8px;'><a href="${r.url}" target="_blank" rel="noopener">${r.title || r.url}</a><br><span style='font-size: 0.95em; color: #666;'>${r.snippet || ''}</span></li>`;
+                        });
+                        htmlContent += `</ul></div>`;
+                        appendMessage(htmlContent, "assistant", false, null, true);
+                        return;
+                    }
+                }
+                // Default: render text response
+                appendMessage(data.response, "assistant");
 
                 } catch (error) {
                     console.error("Chat request error:", error);
@@ -331,6 +463,16 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         }
 
+        // Option 1: right-align user, left-align assistant (already handled by CSS)
+        // Option 2: shorten bubble to content (handled by CSS width: fit-content)
+        // Optionally, add a class for very short messages for better appearance
+        if (sender === "user" && text && text.length < 8) {
+            messageDiv.classList.add("short-user-message");
+        }
+        if (sender === "assistant" && text && text.length < 8) {
+            messageDiv.classList.add("short-assistant-message");
+        }
+
         messagesContainer.appendChild(messageDiv);
         messagesContainer.scrollTop = messagesContainer.scrollHeight; // Auto-scroll
     }
@@ -372,65 +514,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Generate image button handler
-    generateButton.addEventListener("click", () => {
-        const message = input.value.trim();
-        if (!message) {
-            alert("Please enter a description for the image you want to generate");
-            return;
-        }
-        generateImage(message);
-        input.value = "";
-    });
 
-    // Image generation functions
-    async function generateImage(prompt) {
-        console.log("Generating image with prompt:", prompt);
-        
-        // Show user message
-        appendMessage(`Generate image: ${prompt}`, "user");
-        showTypingIndicator();
-        
-        try {
-            const formData = new FormData();
-            formData.append('prompt', prompt);
-            formData.append('session_id', sessionId || '');
-            formData.append('provider', ''); // Use default provider
-            formData.append('size', '1024x1024');
-            formData.append('num_images', '1');
-
-            const response = await fetch('/api/v1/chat/generate-image', {
-                method: 'POST',
-                body: formData
-            });
-
-            removeTypingIndicator();
-
-            if (!response.ok) {
-                const errorData = await response.json();
-                appendMessage(`Error generating image: ${errorData.detail || 'Unknown error'}`, "assistant");
-                return;
-            }
-
-            const data = await response.json();
-            sessionId = data.session_id;
-
-            // Display the generated images
-            if (data.images && data.images.length > 0) {
-                // Only show the generated images, suppress the text context
-                data.images.forEach((imageData, index) => {
-                    const imageUrl = `data:image/png;base64,${imageData.base64_data}`;
-                    appendMessage(`<img src=\"${imageUrl}\" alt=\"Generated image ${index + 1}\" style=\"max-width: 300px; border-radius: 8px; margin: 5px;\">`, "assistant", false, null, true);
-                });
-            } else {
-                appendMessage("No images were generated.", "assistant");
-            }
-        } catch (error) {
-            console.error("Image generation error:", error);
-            removeTypingIndicator();
-            appendMessage("Error generating image. Please try again.", "assistant");
-        }
-    }
+    // (Image generation button and function removed)
 
     // === Chat History UI & Logic ===
     const historySidebar = document.getElementById("history-sidebar");

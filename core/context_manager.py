@@ -66,7 +66,8 @@ class ConversationContext:
         self.metadata: Dict[str, Any] = {}
         self.rag_context: List[Dict[str, Any]] = []
         self.tool_usage_history: List[Dict[str, Any]] = []
-        self.current_task: Optional[MultiStepTask] = None # Changed from str to MultiStepTask
+        self.current_task: Optional[MultiStepTask] = None # For Plan-and-Execute
+        self.react_state: Dict[str, Any] = {} # For ReAct agent state
         self.messages: List[Dict[str, Any]] = []  # Store chat messages
     
     def init(self):
@@ -98,28 +99,23 @@ class ConversationContext:
         }
         self.tool_usage_history.append(tool_record)
 
-    def get_recent_messages(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Get recent messages from the conversation."""
-        return self.messages[-limit:]
+    def get_react_scratchpad(self) -> str:
+        """Get the scratchpad for the ReAct agent."""
+        return self.react_state.get("scratchpad", "")
 
-    def get_context_summary(self) -> Dict[str, Any]:
-        """Get a summary of the current context."""
-        return {
-            "session_id": self.session_id,
-            "rag_contexts": len(self.rag_context),
-            "tool_usage_count": len(self.tool_usage_history),
-            "current_task": self.current_task.to_dict() if self.current_task else None,
-            "last_accessed": self.last_accessed.isoformat()
-        }
-    
-    def is_expired(self) -> bool:
-        """Check if the context has expired."""
-        timeout = timedelta(seconds=settings.SESSION_TIMEOUT)
-        return datetime.utcnow() - self.last_accessed > timeout
+    def update_react_scratchpad(self, thought: str, action: Dict[str, Any], observation: str):
+        """Update the ReAct scratchpad with the latest turn."""
+        scratchpad_entry = f"Thought: {thought}\nAction: {json.dumps(action)}\nObservation: {observation}\n"
+        current_scratchpad = self.react_state.get("scratchpad", "")
+        self.react_state["scratchpad"] = current_scratchpad + scratchpad_entry
+
+    def clear_react_state(self):
+        """Clear the ReAct state, including the scratchpad."""
+        self.react_state = {}
 
 
 class ContextManager:
-    """Manages multiple conversation contexts and provides context-aware operations."""
+    """Manages multiple conversation contexts."""
     
     def __init__(self, rag_service: RAGService):
         self.contexts: Dict[str, ConversationContext] = {}

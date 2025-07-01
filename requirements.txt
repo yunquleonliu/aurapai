@@ -67,3 +67,6 @@ requests>=2.31.0
 
 # Tokenization
 tiktoken>=0.5.1
+
+# Additional requirements for Gemini API
+llama-cpp-python

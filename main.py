@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
         image_generation_service = ImageGenerationService()
         await image_generation_service.initialize()
 
-        tool_service = ToolService(image_generation_service=image_generation_service)
+        tool_service = ToolService(llm_manager=llm_manager)
         await tool_service.initialize()
         
         context_manager = ContextManager(rag_service)

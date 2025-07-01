@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import re
 from datetime import datetime
 
-from services.image_generation_service import ImageGenerationService
+from services.llm_manager import LLMManager, LLMProvider
 
 try:
     from duckduckgo_search import DDGS
@@ -72,11 +72,74 @@ class URLFetchResult:
 class ToolService:
     """Manages external tool capabilities for AI assistance."""
     
-    def __init__(self, image_generation_service: ImageGenerationService):
+    def __init__(self, llm_manager: LLMManager):
         self.session: Optional[aiohttp.ClientSession] = None
         self.ddgs: Optional[DDGS] = None
-        self.image_generation_service = image_generation_service
+        self.llm_manager = llm_manager
         
+        # This is a placeholder. In a real scenario, you would have a more robust
+        # mechanism for defining and registering tools.
+        self.tools = {
+            "clarification": {
+                "function": self.clarification_tool,
+                "description": "Ask the user for clarification when the agent is unsure or needs more information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "The clarifying question to ask the user."}
+                    },
+                    "required": ["question"]
+                }
+            },
+            "web_search": {
+                "function": self.web_search,
+                "description": "Searches the web for information on a given query.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query."}
+                    },
+                    "required": ["query"]
+                }
+            },
+            "search_and_fetch": {
+                "function": self.search_and_fetch,
+                "description": "Search web and fetch content from top results.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query string."},
+                        "fetch_top_results": {"type": "integer", "description": "Number of top results to fetch content from (default: 2)"},
+                        "max_search_results": {"type": "integer", "description": "Maximum search results (default: 5)"}
+                    },
+                    "required": ["query"]
+                }
+            },
+            "generate_image": {
+                "function": self.generate_image,
+                "description": "Generates an image based on a textual description (prompt). This tool uses a powerful public model.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "A detailed description of the image to generate."},
+                        "num_images": {"type": "integer", "description": "Number of images to generate", "default": 1}
+                    },
+                    "required": ["prompt"]
+                }
+            },
+            "call_public_llm": {
+                "function": self.call_public_llm,
+                "description": "Calls a powerful public LLM (like Gemini) for complex reasoning, creative tasks, or up-to-date information. Use this when the local model is insufficient.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The query or prompt to send to the public LLM."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        }
+
     async def initialize(self):
         """Initialize the tool service."""
         logger.info("Initializing Tool Service...")
@@ -360,14 +423,15 @@ class ToolService:
         # --- Add image generation/interpretation tools ---
         tools.append({
             "name": "generate_image",
-            "description": "Generate an image from a text prompt using AI image models.",
-            "parameters": [
-                {"name": "prompt", "type": "string", "description": "Text prompt for image generation."},
-                {"name": "provider", "type": "string", "description": "Image model/provider (optional)"},
-                {"name": "size", "type": "string", "description": "Image size, e.g. 1024x1024 (optional)"},
-                {"name": "style", "type": "string", "description": "Image style, e.g. photorealistic (optional)"},
-                {"name": "num_images", "type": "int", "description": "Number of images to generate (default: 1)"}
-            ]
+            "description": "Generate an image from a text prompt using a powerful AI image model.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "A detailed text prompt for the image generation."},
+                    "num_images": {"type": "integer", "description": "Number of images to generate (default: 1)"}
+                },
+                "required": ["prompt"]
+            }
         })
         tools.append({
             "name": "interpret_image",
@@ -389,36 +453,141 @@ class ToolService:
         return tools
 
     async def invoke_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        """Dynamically invoke a tool by its name."""
+        """Dynamically invoke a tool by its name. Standardizes image tool output."""
         logger.info(f"Invoking tool: {tool_name} with args: {arguments}")
-        
-        tool_map = {
-            "web_search": self.web_search,
-            "fetch_url": self.fetch_url_content,
-            "clarification": self.clarification_tool,
-            "search_and_fetch": self.search_and_fetch,
-            "generate_image": self.image_generation_service.generate_image_tool,
-            "interpret_image": self.image_generation_service.interpret_image_tool,
-        }
-        
-        if tool_name not in tool_map:
-            raise NotImplementedError(f"Tool '{tool_name}' is not implemented.")
-            
-        tool_method = tool_map[tool_name]
-        
-        # Validate arguments
-        # This is a simple validation. For production, use Pydantic models.
-        # ... (argument validation logic can be added here)
+
+        # Intent-driven invocation: handle nested or intent-based tool calls
+        if isinstance(tool_name, dict):
+            tool_name_flat = tool_name.get('name')
+            arguments = tool_name.get('parameters', {})
+            tool_name = tool_name_flat
+        elif isinstance(arguments, dict) and 'intent' in arguments:
+            if tool_name == 'generate_image':
+                arguments = {'prompt': arguments['intent'], 'num_images': 1}
+            elif tool_name == 'web_search':
+                arguments = {'query': arguments['intent'], 'max_results': 5, 'safe_search': True}
+
+        if tool_name not in self.tools:
+            raise NotImplementedError(f"Tool '{tool_name}' is not implemented or defined.")
+
+        tool_method = self.tools[tool_name].get("function")
+        if not tool_method:
+            raise NotImplementedError(f"Tool '{tool_name}' does not have a function defined.")
 
         try:
-            if asyncio.iscoroutinefunction(tool_method):
-                return await tool_method(**arguments)
-            else:
-                return tool_method(**arguments)
+            result = await tool_method(**arguments) if asyncio.iscoroutinefunction(tool_method) else tool_method(**arguments)
+
+            # Standardize image tool output
+            if tool_name == 'generate_image':
+                # If result is a list of GeneratedImage or dicts, take the first
+                if isinstance(result, list) and result:
+                    img = result[0]
+                    # If it's a GeneratedImage object, convert to dict
+                    if hasattr(img, 'to_dict'):
+                        img = img.to_dict()
+                    # Build a data URL for frontend
+                    base64_data = img.get('base64_data')
+                    image_url = f"data:image/png;base64,{base64_data}" if base64_data else None
+                    return {
+                        "status": "success",
+                        "type": "image",
+                        "image_url": image_url,
+                        "base64_data": base64_data,
+                        "message": f"Successfully generated image for: {img.get('prompt', '')}"
+                    }
+                # If already a dict with image_url, just return
+                if isinstance(result, dict) and result.get('type') == 'image':
+                    return result
+
+            # Standardize web_search tool output
+            if tool_name == 'web_search':
+                # If result is a list of WebSearchResult or dicts, convert to dict
+                if isinstance(result, list) and result and hasattr(result[0], 'to_dict'):
+                    search_results = [r.to_dict() for r in result]
+                elif isinstance(result, list) and result and isinstance(result[0], dict):
+                    search_results = result
+                else:
+                    search_results = []
+                return {
+                    "type": "web_search",
+                    "search_results": search_results,
+                    "query": arguments.get("query", ""),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+
+            return result
         except Exception as e:
             logger.error(f"Error invoking tool {tool_name}: {e}", exc_info=True)
             raise
 
     async def clarification_tool(self, question: str) -> Dict[str, str]:
-        """A dummy tool that represents asking for clarification."""
-        return {"clarification_question": question}
+        """A tool that represents asking for clarification. Returns structured response."""
+        return {"status": "success", "type": "clarification", "message": question}
+
+    async def generate_image(self, prompt: str, num_images: int = 1) -> Dict:
+        """Generates an image using Hugging Face Inference API (Stable Diffusion)."""
+        logger.info(f"Generating {num_images} image(s) with prompt: '{prompt}' via Hugging Face API")
+        if not settings.HUGGINGFACE_API_KEY:
+            logger.warning("No Hugging Face API key set. Cannot generate image.")
+            return {"status": "error", "type": "image", "message": "Hugging Face API key not set. Please configure it in backend.", "image_url": None}
+        try:
+            import httpx
+            # Use a free, community model for image generation (confirmed working)
+            api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+            headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"}
+            payload = {"inputs": prompt}
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(api_url, headers=headers, json=payload)
+                if response.status_code == 200:
+                    # Hugging Face returns image bytes directly
+                    image_bytes = response.content
+                    import base64
+                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    image_url = f"data:image/png;base64,{image_b64}"
+                    return {"status": "success", "type": "image", "image_url": image_url, "message": f"Successfully generated image for: {prompt}"}
+                else:
+                    logger.error(f"Hugging Face API error: {response.status_code} {response.text}")
+                    return {"status": "error", "type": "image", "message": f"Hugging Face API error: {response.text}", "image_url": None}
+        except Exception as e:
+            logger.error(f"Error generating image for prompt '{prompt}': {e}", exc_info=True)
+            return {"status": "error", "type": "image", "message": f"Failed to generate image. Details: {str(e)}", "image_url": None}
+
+    async def generate_video(self, prompt: str) -> Dict:
+        """Generates a video using Hugging Face Inference API (text-to-video)."""
+        logger.info(f"Generating video with prompt: '{prompt}' via Hugging Face API")
+        if not settings.HUGGINGFACE_API_KEY:
+            logger.warning("No Hugging Face API key set. Cannot generate video.")
+            return {"status": "error", "type": "video", "message": "Hugging Face API key not set. Please configure it in backend.", "video_url": None}
+        try:
+            import httpx
+            api_url = "https://api-inference.huggingface.co/models/damo-vilab/text-to-video-ms-1.7b"
+            headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"}
+            payload = {"inputs": prompt}
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(api_url, headers=headers, json=payload)
+                if response.status_code == 200:
+                    # Hugging Face returns video bytes directly
+                    video_bytes = response.content
+                    import base64
+                    video_b64 = base64.b64encode(video_bytes).decode("utf-8")
+                    video_url = f"data:video/mp4;base64,{video_b64}"
+                    return {"status": "success", "type": "video", "video_url": video_url, "message": f"Successfully generated video for: {prompt}"}
+                else:
+                    logger.error(f"Hugging Face API error: {response.status_code} {response.text}")
+                    return {"status": "error", "type": "video", "message": f"Hugging Face API error: {response.text}", "video_url": None}
+        except Exception as e:
+            logger.error(f"Error generating video for prompt '{prompt}': {e}", exc_info=True)
+            return {"status": "error", "type": "video", "message": f"Failed to generate video. Details: {str(e)}", "video_url": None}
+
+    async def call_public_llm(self, query: str) -> str:
+        """Calls the public LLM via the LLMManager."""
+        logger.info(f"Calling public LLM with query: '{query}'")
+        try:
+            response = await self.llm_manager.generate_response(
+                provider=LLMProvider.GEMINI,
+                prompt=query
+            )
+            return response.content
+        except Exception as e:
+            logger.error(f"Error calling public LLM for query '{query}': {e}")
+            return {"error": str(e)}

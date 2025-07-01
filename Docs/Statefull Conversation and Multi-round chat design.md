@@ -1,73 +1,95 @@
-# Identify the intention with statefull and multi round conversation.
+# Aura-PAI Agent Architecture Design
 
-## Introduction
+## 1. Core Challenge: Stateful, Multi-Step Conversations
 
-The LLM model is stateless. The conversational application built around it is stateful, and it maintains this state by managing the conversation history and feeding it back to the model on every turn. Remember we have an open question part?
+The primary goal of Aura-PAI is to handle complex user requests that require multiple steps, tool usage, and access to external information (e.g., "Find recent news about NASDAQ, summarize the key points, and tell me if now is a good time to invest."). This requires a sophisticated agent architecture that can manage state, reason about a problem, and execute a plan.
 
-Here is the issue/value of so called privacy. if our program remember more about user's privacy and chat history, we can manage a better service, but with more privacy, the user is more concerned. that is the motivate of building aura-pai, an Pai for anyoneLLM (not anything LLM). 
+A central challenge is the trade-off between personalization and privacy. A more personalized AI needs to remember user context and history, but this raises privacy concerns. Aura-PAI's architecture is designed to address this by giving the user control over their data and how it is used.
 
-the central tension in creating a truly personal AI: the trade-off between personalization and privacy.
+## 2. Agent Implementation Strategy: Feature-Flagged Evolution
 
- • To provide a highly effective, stateful, multi-turn service (like checking reservations), the AI needs to remember context, preferences, and previous interactions. This is user data.
- 
-  • The more data it remembers, the more useful it becomes, but also the greater the user's privacy concerns.  The goal of Aura-PAI, as you put it, is to be a "PAI for anyone" (a Personal AI), which means navigating this trade-off is not just a technical challenge, but the core value proposition. The user needs to be in control of what their "Personal" AI knows about them
+To ensure stability while innovating, we are adopting a feature-flag-driven approach. The application supports two distinct agent architectures, controlled by the `AGENT_MODE` setting in `core/config.py`.
 
-## What
+-   `AGENT_MODE = "Plan-and-Execute"`: (Default, Stable) Uses the original, robust agent that creates a full plan upfront and executes it step-by-step.
+-   `AGENT_MODE = "ReAct"`: (In Development) Uses the next-generation hierarchical agent that combines a local, privacy-focused LLM with a powerful public LLM in a dynamic, step-by-step reasoning loop.
 
-如何让AI在“帮我查下某些网站的预订/预约情况”这类复杂需求下，真正完成多轮工具调用、信息聚合与总结？
+This strategy allows for the safe, parallel development and testing of the new ReAct agent without disrupting the currently deployed and working `Plan-and-Execute` agent.
 
-“多轮回合式”智能体编排与真实信息获取，是Auro-PAI面临的核心挑战之一，需持续探索。
+## 3. Architecture 1: The Plan-and-Execute Agent
 
-## Architecture: The Plan-and-Execute Agent
-
-To address the open question of handling complex, multi-step user requests, we propose moving from a simple, reactive "intent -> tool" model to a proactive, multi-step **Plan-and-Execute Agent** architecture. This approach turns the LLM from a simple answer-bot into a reasoning and planning engine that uses the tools we provide.
+This is the current, stable architecture for handling multi-step tasks.
 
 ### Core Workflow
 
-The workflow consists of three main stages:
+The workflow consists of three main stages: Decomposition (Planning), State Management, and Execution.
 
-#### 1. Decomposition (Planning)
+#### a. Decomposition (Planning)
 
--   **Goal:** Instead of trying to find a single intent, the first LLM call is to create a structured plan.
--   **Mechanism:** We use a specific system prompt to instruct the LLM to act as a planner.
-    -   *System Prompt Example:* "You are a helpful planning assistant. Your job is to break down a user's request into a series of discrete, ordered steps that can be executed by tools. The available tools are [`web_search`, `url_fetch`, `summarize_text`]. Respond with a JSON object containing a 'plan' which is a list of steps. Each step must have a 'tool' and 'arguments'."
--   **Output:** The LLM returns a machine-readable JSON plan.
-    -   *Example for "Find camping sites near Ottawa, check their reservation status, and give me a recommendation":*
-        ```json
-        {
-          "plan": [
-            { "tool": "web_search", "arguments": {"query": "camping sites near Ottawa"} },
-            { "tool": "url_fetch", "arguments": {"urls": ["<placeholder_for_url_1>", "<placeholder_for_url_2>"]} },
-            { "tool": "summarize_text", "arguments": {"text": "<placeholder_for_fetched_content>", "question": "What is the reservation status and availability?"} }
-          ]
-        }
-        ```
+-   **Goal:** An initial LLM call creates a complete, structured plan in JSON format.
+-   **Prompting:** The LLM is instructed to act as a planner, breaking the user's request into a sequence of tool calls.
 
-#### 2. State Management (Context Manager)
+#### b. State Management (Context Manager)
 
 -   **Goal:** To track the progress of the multi-step plan.
--   **Mechanism:** The `ContextManager` is enhanced to store a stateful task object instead of a simple string.
--   **Implementation:**
-    -   A `MultiStepTask` class is introduced in `core/context_manager.py`.
-    -   This class instance stores the original `plan`, tracks the `current_step`, and accumulates the `results` of each completed step.
-    -   When the plan is generated, this `MultiStepTask` object is created and saved in the user's `ConversationContext`.
+-   **Implementation:** A `MultiStepTask` object is stored in the `ConversationContext` to hold the plan, the current step, and the results of each action.
 
-#### 3. Execution Loop (Orchestrator)
+#### c. Execution Loop (Orchestrator)
 
 -   **Goal:** To execute the plan step-by-step.
--   **Mechanism:** The main chat endpoint (in `api/routes/chat.py`) acts as an orchestrator, running an execution loop.
--   **Loop Logic:**
-    1.  **Check for Active Task:** On a new user message, check if a `MultiStepTask` is in progress.
-    2.  **Get Next Step:** Retrieve the next action from the plan (e.g., `{"tool": "web_search", ...}`).
-    3.  **Execute Tool:** Call the corresponding service (e.g., `tool_service.py`) to execute the tool.
-    4.  **Update State:** Save the tool's output (e.g., a list of URLs) into the `step_results` of the `MultiStepTask` and advance the `current_step`.
-    5.  **Populate Placeholders:** Use the results from completed steps to fill in arguments for future steps.
-    6.  **Repeat:** Continue the loop until all steps are complete.
-    7.  **Final Summary:** Once the plan is finished, make a final call to the LLM, providing all the collected evidence and the user's original query to generate a comprehensive answer.
+-   **Logic:** The chat endpoint in `api/routes/chat.py` iterates through the plan, calls the necessary tools via `tool_service.py`, and stores the results until the plan is complete. A final summary is then generated.
 
-### How This Solves the Core Problem
+## 4. Architecture 2: The Hierarchical ReAct Agent (In Development)
 
--   **No Hardcoding:** The LLM generates the plan dynamically. We only code the execution loop and the atomic tools.
--   **Handles Ambiguity:** The loop can pause and ask the user for clarification if a step is ambiguous or requires user input, then resume the plan.
--   **Manages Complex Context:** The `MultiStepTask` object in the `ContextManager` provides robust, explicit state tracking for the entire operation.
--   **Preserves Privacy:** The state is task-specific and ephemeral. We can configure it to be cleared after the task is complete, respecting the user's privacy choices for long-term history.
+This is the next evolution of our architecture, designed for greater efficiency, adaptability, and a clearer separation of private and public data processing.
+
+### Core Concept: Hierarchical LLM Roles
+
+This model uses two distinct types of LLMs:
+
+-   **Local/Private LLM (Personal Orchestrator):** A local model that manages the direct user interaction. It operates on a **ReAct (Reason-Act)** framework, deciding the single next best action in a loop. It has access to private, long-term user history and acts as a smart, privacy-aware router.
+-   **Remote/Public LLM (Expert Specialist):** A powerful, public model (e.g., Gemini) treated as a stateless "tool." It handles complex reasoning and knowledge-intensive tasks, receiving only curated, context-specific prompts from the local orchestrator.
+
+### Core Loop: Think -> Act -> Observe
+
+Instead of a rigid upfront plan, the Local LLM engages in a dynamic loop:
+
+1.  **Think (Reason):** Decide the single next best action (e.g., "I need to search the web for reviews").
+2.  **Act (Execute):** Execute that one action (e.g., call the `web_search` tool or call the Remote LLM tool).
+3.  **Observe (Get Result):** Receive the result and add it to the context as an "observation."
+4.  **Repeat:** The loop continues until the Local LLM determines it has enough information to provide a final answer.
+
+### User Interaction Workflow
+
+The user is given explicit control over which model to use:
+
+1.  **`Send` (Default Interaction):** The query goes to the **Local LLM**, which begins its ReAct loop. It may use its own tools or decide to formulate a prompt for the **Remote LLM**.
+2.  **`Public Send` (Explicit Bypass):** The query is sent **directly** to the **Remote LLM** for a powerful, one-shot, stateless response.
+
+### 4.1 Intent-Driven Tool Invocation (Robust ReAct Design)
+
+**Motivation:**
+
+-   Local LLMs are often unreliable at generating perfectly formatted tool-call JSON, and may hallucinate parameters or produce malformed output.
+-   To maximize reliability, the backend should handle deterministic, accurate, and stateful tool invocation based on the LLM's interpreted intent, not on raw LLM-generated tool call code.
+
+**How it works:**
+
+-   The Local LLM's job is to identify the user's intent and the tool to use (e.g., `{"tool": "generate_image", "intent": "a picture of a chicken"}` or `{"tool": "web_search", "query": "latest news on NASDAQ"}`).
+-   The backend parses this intent, validates and fills in required parameters, and constructs the correct tool call.
+-   The backend manages all parameter defaults, schema validation, and stateful execution, ensuring robust and predictable behavior.
+-   This approach is more reliable, easier to debug, and safer, especially with local LLMs. It also allows the backend to enforce parameter schemas and handle tool chaining and state management more accurately.
+
+**Example:**
+
+-   LLM output: `{"tool": "generate_image", "intent": "a picture of a chicken"}`
+-   Backend logic:
+    -   Recognizes the tool as `generate_image`.
+    -   Maps `intent` to the `prompt` parameter, sets `num_images=1` by default.
+    -   Calls `generate_image(prompt="a picture of a chicken", num_images=1)`.
+    -   Handles any errors or missing parameters deterministically.
+
+**Benefits:**
+
+-   No more brittle JSON parsing or hallucinated parameters.
+-   Backend is always in control of tool invocation and state.
+-   LLM can focus on reasoning and intent, not on perfect syntax.
