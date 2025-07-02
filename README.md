@@ -346,7 +346,7 @@ curl http://localhost:8000/api/v1/health
 
 ## License
 
-[Add your license information here]
+This project is licensed under the [Open License for Privacy and Transparency](LICENSE.md). See the `LICENSE.md` file for details.
 
 ## Support
 
