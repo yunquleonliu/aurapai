@@ -91,15 +91,16 @@ document.addEventListener("DOMContentLoaded", () => {
     loadSessions();
 
     clearHistoryButton.addEventListener("click", () => {
-        // Only clear the current session's history, not all sessions
+        // Remove the current session and its history from localStorage and UI
         if (!sessionId) return;
         let sessions = JSON.parse(localStorage.getItem("chat_sessions")) || [];
-        let session = sessions.find(s => s.id === sessionId);
-        if (session) {
-            session.history = [];
-            localStorage.setItem("chat_sessions", JSON.stringify(sessions));
-        }
+        sessions = sessions.filter(s => s.id !== sessionId);
+        localStorage.setItem("chat_sessions", JSON.stringify(sessions));
+        // Remove from UI
+        sessionList.innerHTML = "";
+        loadSessions();
         messagesContainer.innerHTML = "";
+        sessionId = null;
         appendMessage("Hello! I am Aura-PAI. How can I assist you today? You can also attach images for visual analysis.", "assistant");
     });
 

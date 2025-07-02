@@ -127,6 +127,18 @@ class ToolService:
                     "required": ["prompt"]
                 }
             },
+            "interpret_image": {
+                "function": self.interpret_image,
+                "description": "Interprets or analyzes an uploaded image (OCR, description, etc) using the local Mixtral+LLaVA model.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_base64": {"type": "string", "description": "Base64-encoded image data."},
+                        "task": {"type": "string", "description": "Analysis task, e.g. 'describe', 'ocr', 'detect_objects' (optional)"}
+                    },
+                    "required": ["image_base64"]
+                }
+            },
             "call_public_llm": {
                 "function": self.call_public_llm,
                 "description": "Calls a powerful public LLM (like Gemini) for complex reasoning, creative tasks, or up-to-date information. Use this when the local model is insufficient.",
@@ -139,6 +151,33 @@ class ToolService:
                 }
             }
         }
+    async def interpret_image(self, image_base64: str, task: str = "describe") -> Dict[str, Any]:
+        """Interprets or analyzes an uploaded image using the local Mixtral+LLaVA model."""
+        logger.info(f"Interpreting image with task '{task}' using Mixtral+LLaVA.")
+        try:
+            # Compose prompt for vision model
+            prompt = f"[IMAGE]\nTask: {task or 'describe'}"
+            # Call local LLMManager with vision capability (assume LLAMACPP is Mixtral+LLaVA)
+            response = await self.llm_manager.generate_response(
+                provider=LLMProvider.LLAMACPP,
+                prompt=prompt,
+                image_base64=image_base64,
+                task=task
+            )
+            return {
+                "status": "success",
+                "type": "image_interpretation",
+                "task": task,
+                "result": response.content
+            }
+        except Exception as e:
+            logger.error(f"Error interpreting image: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "type": "image_interpretation",
+                "task": task,
+                "message": f"Failed to interpret image. Details: {str(e)}"
+            }
 
     async def initialize(self):
         """Initialize the tool service."""
