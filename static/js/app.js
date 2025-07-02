@@ -226,71 +226,59 @@ document.addEventListener("DOMContentLoaded", () => {
         } else {
             appendMessage(message, "user");
         }
-        
+
         input.value = "";
         showTypingIndicator();
-        
+
         // Show stop button, hide send button
-        console.log("Showing stop button, hiding send button");
         sendButton.style.display = 'none';
         stopButton.style.display = 'flex';
 
         try {
             if (selectedImage) {
-                // Handle image upload (non-streaming for now)
-                const formData = new FormData();
-                formData.append('message', message || 'Please analyze this image');
-                formData.append('image', selectedImage);
-                formData.append('session_id', sessionId || '');
-                formData.append('include_rag', 'true');
-                formData.append('include_tools', 'true');
-                formData.append('temperature', '0.7');
-
-                const response = await fetch('/api/v1/chat/image', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                removeTypingIndicator();
-                stopButton.style.display = 'none';
-                sendButton.style.display = 'flex';
-
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.detail || "An unknown error occurred.");
-                }
-
-                const data = await response.json();
-                sessionId = data.session_id;
-                
-                // Check if this is an image generation response
-                if (data.metadata && data.metadata.type === "image_generation" && data.metadata.images) {
-                    // Handle image generation response
-                    let imagesHtml = '<div class="generated-images">';
-                    data.metadata.images.forEach((imageData, index) => {
-                        const imageUrl = `data:image/png;base64,${imageData.base64_data}`;
-                        imagesHtml += `
-                            <div class="generated-image">
-                                <img src="${imageUrl}" alt="Generated image ${index + 1}" style="max-width: 300px; border-radius: 8px; margin: 5px;">
-                                <p><small>Model: ${imageData.model} | Size: ${Math.round(imageData.size_bytes / 1024)}KB</small></p>
-                            </div>`;
-                    });
-                    imagesHtml += '</div>';
-                    // Append as HTML instead of text
-                    const htmlContent = data.response + imagesHtml;
-                    const htmlMsgDiv = createMessageDiv("assistant");
-                    htmlMsgDiv.innerHTML = htmlContent;
-                    messagesContainer.appendChild(htmlMsgDiv);
-                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
-                } else {
-                    appendMessage(data.response, "assistant");
-                }
-
-                // Clear image after sending
-                selectedImage = null;
-                imagePreview.style.display = 'none';
-                imageInput.value = '';
-
+                // Read image as base64 and send to /api/v1/tools/interpret-image
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64Data = e.target.result.split(",")[1]; // Remove data:image/...;base64,
+                    const payload = {
+                        image_base64: base64Data,
+                        task: "describe"
+                    };
+                    try {
+                        const response = await fetch('/api/v1/tools/interpret-image', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json'
+                            },
+                            body: JSON.stringify(payload)
+                        });
+                        removeTypingIndicator();
+                        stopButton.style.display = 'none';
+                        sendButton.style.display = 'flex';
+                        if (!response.ok) {
+                            const errorData = await response.json();
+                            throw new Error(errorData.detail || "An unknown error occurred.");
+                        }
+                        const data = await response.json();
+                        if (data.status === "success") {
+                            let htmlContent = `<b>Image interpretation:</b><br><span>${data.result}</span>`;
+                            appendMessage(htmlContent, "assistant", false, null, true);
+                        } else {
+                            appendMessage(`Image interpretation failed: ${data.message || 'Unknown error.'}`, "assistant", true);
+                        }
+                    } catch (error) {
+                        removeTypingIndicator();
+                        stopButton.style.display = 'none';
+                        sendButton.style.display = 'flex';
+                        appendMessage(`Image interpretation error: ${error.message}`, "assistant", true);
+                    }
+                    // Clear image after sending
+                    selectedImage = null;
+                    imagePreview.style.display = 'none';
+                    imageInput.value = '';
+                };
+                reader.readAsDataURL(selectedImage);
             } else {
                 // Handle text-only request (non-streaming)
                 const payload = {

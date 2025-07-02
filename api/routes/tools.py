@@ -63,6 +63,19 @@ class SearchAndFetchResult(BaseModel):
     timestamp: str = Field(..., description="Operation timestamp")
 
 
+class ImageInterpretRequest(BaseModel):
+    image_base64: str
+    task: str = "describe"
+
+
+class ImageInterpretResult(BaseModel):
+    status: str
+    type: str
+    task: str
+    result: str = None
+    message: str = None
+
+
 @router.post("/tools/search", response_model=List[WebSearchResult])
 async def web_search(request: WebSearchRequest, req: Request):
     """Perform web search using configured search engine."""
@@ -158,6 +171,21 @@ async def search_and_fetch(request: SearchAndFetchRequest, req: Request):
         
     except Exception as e:
         logger.error(f"Search and fetch error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tools/interpret-image", response_model=ImageInterpretResult)
+async def interpret_image(request: ImageInterpretRequest, req: Request):
+    """Interpret or analyze an uploaded image using the local Mixtral+LLaVA model."""
+    try:
+        tool_service = req.app.state.tool_service
+        result = await tool_service.interpret_image(
+            image_base64=request.image_base64,
+            task=request.task
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Image interpretation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
