@@ -1,4 +1,4 @@
-# Auro-PAI Platform Backend Requirements
+# Aura-PAI Platform Backend Requirements
 
 # FastAPI and web framework
 fastapi>=0.100.0
@@ -60,3 +60,27 @@ asyncpg>=0.29.0
 # Utilities
 click>=8.1.0
 rich>=13.0.0
+
+# Image generation and processing
+pillow>=10.0.0
+requests>=2.31.0
+
+# Tokenization
+tiktoken>=0.5.1
+
+# LLM
+litellm
+llama-cpp-python
+openai
+
+# Document Processing
+langchain
+langchain-community
+langchain-text-splitters
+sentence-transformers
+pypdf
+chromadb
+
+# Image Generation
+httpx
+Pillow

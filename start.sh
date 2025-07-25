@@ -76,7 +76,7 @@ setup_env() {
 
 # Check if llama.cpp server is running
 check_llamacpp() {
-    LLAMACPP_URL=$(grep "^LLAMACPP_SERVER_URL=" .env | cut -d'=' -f2 | tr -d '"')
+    LLAMACPP_URL=$(grep "^=" .env | cut -d'=' -f2 | tr -d '"')
     if [ -z "$LLAMACPP_URL" ]; then
         LLAMACPP_URL="http://10.0.0.206:8000"
     fi
@@ -107,8 +107,19 @@ check_chromadb() {
     if curl -s "http://$CHROMADB_HOST:$CHROMADB_PORT/api/v1/heartbeat" > /dev/null 2>&1; then
         print_success "ChromaDB server is running"
     else
-        print_warning "ChromaDB server not accessible (will use in-memory mode)"
-        print_warning "To start ChromaDB server: chroma run --host $CHROMADB_HOST --port $CHROMADB_PORT"
+        print_warning "ChromaDB server not accessible."
+        if command -v chroma &> /dev/null; then
+            print_status "Attempting to start ChromaDB server in the background..."
+            chroma run --host "$CHROMADB_HOST" --port "$CHROMADB_PORT" &
+            sleep 5 # Give the server a moment to start
+            if curl -s "http://$CHROMADB_HOST:$CHROMADB_PORT/api/v1/heartbeat" > /dev/null 2>&1; then
+                print_success "ChromaDB server started successfully."
+            else
+                print_error "Failed to start ChromaDB server. Please start it manually."
+            fi
+        else
+            print_error "ChromaDB is not installed or not in PATH. Please install it with 'pip install chromadb'"
+        fi
     fi
 }
 
@@ -137,6 +148,9 @@ start_server() {
     print_status ""
     print_status "Press Ctrl+C to stop the server"
     
+    # Set the agent mode directly to ensure it runs as ReAct
+    export AGENT_MODE="ReAct"
+
     # Start with uvicorn for development, or python main.py
     if command -v uvicorn &> /dev/null; then
         uvicorn main:app --host 0.0.0.0 --port ${SERVER_PORT} --reload

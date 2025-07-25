@@ -13,6 +13,8 @@ import logging
 from typing import Dict, List, Optional, Any, AsyncGenerator
 from enum import Enum
 
+import google.generativeai as genai
+
 from core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -37,12 +39,21 @@ class LLMResponse:
 
 
 class LLMManager:
+    @staticmethod
+    async def stream_answer(answer: str, chunk_size: int = 128):
+        """
+        Async generator to stream a pre-generated answer string in chunks.
+        """
+        for i in range(0, len(answer), chunk_size):
+            yield answer[i:i+chunk_size]
     """Manages LLM interactions across different providers."""
     
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
         self.available_providers: List[LLMProvider] = []
         self.default_provider = LLMProvider.LLAMACPP
+        self.gemini_model: Optional[genai.GenerativeModel] = None
+        self.gemini_image_model: Optional[genai.GenerativeModel] = None
         
     async def initialize(self):
         """Initialize the LLM manager and check available providers."""
@@ -51,6 +62,25 @@ class LLMManager:
         # Create HTTP session
         timeout = aiohttp.ClientTimeout(total=settings.LLAMACPP_TIMEOUT)
         self.session = aiohttp.ClientSession(timeout=timeout)
+        
+        # Configure Gemini
+        if settings.GEMINI_API_KEY:
+            try:
+                genai.configure(api_key=settings.GEMINI_API_KEY)
+                # Use latest supported Gemini models for text and image
+                # Override config if old/deprecated model is set
+                gemini_model_name = getattr(settings, 'GEMINI_MODEL', None) or 'gemini-1.5-flash'
+                gemini_image_model_name = getattr(settings, 'GEMINI_IMAGE_MODEL', None) or 'gemini-1.5-flash'
+                # If config uses deprecated model, force upgrade
+                if 'pro-vision' in gemini_image_model_name or 'pro' in gemini_image_model_name:
+                    gemini_image_model_name = 'gemini-1.5-flash'
+                if 'pro' in gemini_model_name:
+                    gemini_model_name = 'gemini-1.5-flash'
+                self.gemini_model = genai.GenerativeModel(gemini_model_name)
+                self.gemini_image_model = genai.GenerativeModel(gemini_image_model_name)
+                logger.info(f"Gemini API configured successfully. Text model: {gemini_model_name}, Image model: {gemini_image_model_name}")
+            except Exception as e:
+                logger.error(f"Failed to configure Gemini API: {e}")
         
         # Check available providers
         await self._check_providers()
@@ -84,262 +114,279 @@ class LLMManager:
     
     async def _check_llamacpp(self) -> bool:
         """Check if llama.cpp server is available."""
+        health_url = f"{settings.LLAMACPP_SERVER_URL}/health"
+        logger.info(f"Checking llama.cpp server health at: {health_url}")
         try:
-            async with self.session.get(f"{settings.LLAMACPP_SERVER_URL}/health") as response:
-                return response.status == 200
-        except Exception as e:
-            logger.warning(f"llama.cpp server not available: {e}")
+            async with self.session.get(health_url) as response:
+                if response.status == 200:
+                    logger.info("llama.cpp server is available.")
+                    return True
+                else:
+                    logger.error(f"llama.cpp server returned status {response.status} from {health_url}")
+                    return False
+        except aiohttp.ClientConnectorError as e:
+            logger.error(f"Could not connect to llama.cpp server at {health_url}. Connection error: {e}")
             return False
-    
-    async def health_check(self) -> Dict[str, Any]:
-        """Perform health check on all providers."""
-        health_status = {
-            "available_providers": [p.value for p in self.available_providers],
-            "default_provider": self.default_provider.value,
-            "providers": {}
-        }
-        
-        for provider in self.available_providers:
-            if provider == LLMProvider.LLAMACPP:
-                is_healthy = await self._check_llamacpp()
-                health_status["providers"]["llamacpp"] = {
-                    "status": "healthy" if is_healthy else "unhealthy",
-                    "url": settings.LLAMACPP_SERVER_URL
-                }
-            elif provider == LLMProvider.OPENAI:
-                health_status["providers"]["openai"] = {
-                    "status": "configured",
-                    "model": settings.OPENAI_MODEL
-                }
-            elif provider == LLMProvider.GEMINI:
-                health_status["providers"]["gemini"] = {
-                    "status": "configured",
-                    "model": settings.GEMINI_MODEL
-                }
-        
-        return health_status
-    
-    async def generate_response(
-        self,
-        messages: List[Dict[str, str]],
-        provider: Optional[LLMProvider] = None,
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        stream: bool = False
-    ) -> LLMResponse:
-        """Generate a response using the specified or default provider."""
-        
-        if provider is None:
-            provider = self.default_provider
-        
-        if provider not in self.available_providers:
-            raise ValueError(f"Provider {provider.value} is not available")
-        
-        try:
-            if provider == LLMProvider.LLAMACPP:
-                return await self._generate_llamacpp(messages, temperature, max_tokens)
-            elif provider == LLMProvider.OPENAI:
-                return await self._generate_openai(messages, temperature, max_tokens)
-            elif provider == LLMProvider.GEMINI:
-                return await self._generate_gemini(messages, temperature, max_tokens)
-            else:
-                raise ValueError(f"Unsupported provider: {provider.value}")
-                
         except Exception as e:
-            logger.error(f"Error generating response with {provider.value}: {e}")
-            raise
-    
-    async def _generate_llamacpp(
-        self,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        max_tokens: Optional[int]
-    ) -> LLMResponse:
-        """Generate response using llama.cpp server."""
-        
-        # Convert messages to llama.cpp format
-        prompt = self._messages_to_prompt(messages)
-        
-        payload = {
-            "prompt": prompt,
-            "temperature": temperature,
-            "n_predict": max_tokens or 512,
-            "stop": ["</s>", "[INST]", "[/INST]"],
-            "stream": False
-        }
-        
-        url = f"{settings.LLAMACPP_SERVER_URL}/completion"
-        
-        async with self.session.post(url, json=payload) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                raise RuntimeError(f"llama.cpp error: {error_text}")
-            
-            result = await response.json()
-            content = result.get("content", "").strip()
-            
-            return LLMResponse(
-                content=content,
-                provider="llamacpp",
-                model=settings.LLAMACPP_MODEL_NAME,
-                usage={
-                    "prompt_tokens": result.get("tokens_evaluated", 0),
-                    "completion_tokens": result.get("tokens_predicted", 0)
-                }
-            )
-    
-    async def _generate_openai(
-        self,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        max_tokens: Optional[int]
-    ) -> LLMResponse:
-        """Generate response using OpenAI API."""
-        
-        headers = {
-            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": settings.OPENAI_MODEL,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-        
-        url = "https://api.openai.com/v1/chat/completions"
-        
-        async with self.session.post(url, json=payload, headers=headers) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                raise RuntimeError(f"OpenAI API error: {error_text}")
-            
-            result = await response.json()
-            content = result["choices"][0]["message"]["content"]
-            
-            return LLMResponse(
-                content=content,
-                provider="openai",
-                model=settings.OPENAI_MODEL,
-                usage=result.get("usage", {})
-            )
-    
-    async def _generate_gemini(
-        self,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        max_tokens: Optional[int]
-    ) -> LLMResponse:
-        """Generate response using Google Gemini API."""
-        
-        # Convert messages to Gemini format
-        contents = []
-        for msg in messages:
-            role = "user" if msg["role"] == "user" else "model"
-            contents.append({
-                "role": role,
-                "parts": [{"text": msg["content"]}]
-            })
-        
-        payload = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens or 512
-            }
-        }
-        
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMINI_MODEL}:generateContent"
-        params = {"key": settings.GEMINI_API_KEY}
-        
-        async with self.session.post(url, json=payload, params=params) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                raise RuntimeError(f"Gemini API error: {error_text}")
-            
-            result = await response.json()
-            content = result["candidates"][0]["content"]["parts"][0]["text"]
-            
-            return LLMResponse(
-                content=content,
-                provider="gemini",
-                model=settings.GEMINI_MODEL,
-                usage=result.get("usageMetadata", {})
-            )
-    
-    def _messages_to_prompt(self, messages: List[Dict[str, str]]) -> str:
-        """Convert messages to a prompt format for llama.cpp."""
-        prompt_parts = []
-        
-        for message in messages:
-            role = message["role"]
-            content = message["content"]
-            
-            if role == "system":
-                prompt_parts.append(f"System: {content}")
-            elif role == "user":
-                prompt_parts.append(f"[INST] {content} [/INST]")
-            elif role == "assistant":
-                prompt_parts.append(content)
-        
-        return "\n\n".join(prompt_parts)
-    
-    async def generate_streaming_response(
-        self,
-        messages: List[Dict[str, str]],
-        provider: Optional[LLMProvider] = None,
+            logger.error(f"An unexpected error occurred while checking llama.cpp server: {e}")
+            return False
+
+    async def generate_stream(
+        self, 
+        provider: LLMProvider,
+        prompt: Optional[str] = None,
+        history: Optional[List[Dict]] = None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None
+        max_tokens: int = 2048,
+        stop: Optional[List[str]] = None,
+        **kwargs: Any
     ) -> AsyncGenerator[str, None]:
-        """Generate a streaming response."""
-        
-        if provider is None:
-            provider = self.default_provider
-        
-        if provider not in self.available_providers:
-            raise ValueError(f"Provider {provider.value} is not available")
-        
+        """
+        Gateway for generating a streaming response from a specified LLM provider.
+
+        Args:
+            prompt (str): The user's prompt.
+            provider (LLMProvider): The provider to use for generation.
+            history (Optional[List[Dict]], optional): Conversation history. Defaults to None.
+            temperature (float, optional): The generation temperature. Defaults to 0.7.
+            max_tokens (int, optional): Max tokens to generate. Defaults to 2048.
+            stop (Optional[List[str]], optional): Stop sequences. Defaults to None.
+
+        Yields:
+            AsyncGenerator[str, None]: A stream of response tokens.
+        """
         if provider == LLMProvider.LLAMACPP:
-            async for chunk in self._stream_llamacpp(messages, temperature, max_tokens):
+            async for chunk in self._generate_llamacpp_stream(prompt, history, temperature, max_tokens, stop, **kwargs):
+                yield chunk
+        elif provider == LLMProvider.GEMINI:
+            if not self.gemini_model:
+                raise ValueError("Gemini provider is not configured.")
+            
+            # Check for image generation keywords
+            is_image_generation = False
+            if prompt and any(keyword in prompt.lower() for keyword in ["generate image", "create a picture", "draw"]):
+                is_image_generation = True
+
+            # Remove is_image_generation from kwargs if present, and set it explicitly
+            is_image_generation = kwargs.pop('is_image_generation', False)
+            async for chunk in self._generate_gemini_stream(prompt, history, temperature, max_tokens, stop, is_image_generation=is_image_generation, **kwargs):
                 yield chunk
         else:
-            # For non-streaming providers, yield the full response
-            response = await self.generate_response(messages, provider, temperature, max_tokens)
-            yield response.content
-    
-    async def _stream_llamacpp(
+            raise ValueError(f"Unsupported LLM provider: {provider}")
+
+    async def _generate_gemini_stream(
         self,
-        messages: List[Dict[str, str]],
-        temperature: float,
-        max_tokens: Optional[int]
+        prompt: Optional[str] = None,
+        history: Optional[List[Dict]] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        stop: Optional[List[str]] = None,
+        is_image_generation: bool = False,
+        **kwargs: Any
     ) -> AsyncGenerator[str, None]:
-        """Stream response from llama.cpp server."""
+        """Generate a streaming response from Gemini. Logs and yields raw Gemini output for debugging image generation."""
+        logger.debug(f"Generating stream from Gemini with prompt: {prompt[:100] if prompt else ''}...")
+        try:
+            model_to_use = self.gemini_image_model if is_image_generation else self.gemini_model
+            if not model_to_use:
+                raise ValueError("The requested Gemini model is not configured.")
+
+            # Note: Gemini API uses 'temperature' and 'max_output_tokens'.
+            generation_config = genai.types.GenerationConfig(
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+                stop_sequences=stop
+            )
+
+            chat_history = []
+            if history:
+                for message in history:
+                    role = "model" if message.get("role") == "assistant" else "user"
+                    chat_history.append({"role": role, "parts": [message.get("content", "")]})
+
+            final_prompt = prompt if prompt and not (history and history[-1]['content'] == prompt) else prompt
+
+            chat = model_to_use.start_chat(history=chat_history)
+            response = await asyncio.to_thread(
+                chat.send_message,
+                final_prompt,
+                stream=True,
+                generation_config=generation_config
+            )
+
+            # --- DEBUG: Log and yield raw Gemini output for image generation ---
+            for chunk in response:
+                logger.info(f"Gemini raw chunk: {repr(chunk)}")
+                # Try to yield both text and any possible image fields
+                if hasattr(chunk, 'text') and chunk.text:
+                    yield chunk.text
+                # If Gemini returns images as base64 or URLs, log and yield them
+                if hasattr(chunk, 'candidates'):
+                    logger.info(f"Gemini chunk.candidates: {repr(chunk.candidates)}")
+                    for candidate in chunk.candidates:
+                        if hasattr(candidate, 'content'):
+                            logger.info(f"Gemini candidate.content: {repr(candidate.content)}")
+                        if hasattr(candidate, 'images'):
+                            logger.info(f"Gemini candidate.images: {repr(candidate.images)}")
+                        # Try to yield image data if present
+                        if hasattr(candidate, 'images') and candidate.images:
+                            for img in candidate.images:
+                                logger.info(f"Gemini image: {repr(img)}")
+                                yield str(img)
+
+        except Exception as e:
+            logger.error(f"Error generating response from Gemini: {e}")
+            yield f"Error: Could not get response from Gemini. Details: {e}"
+
+    async def _generate_llamacpp_stream(
+        self,
+        prompt: Optional[str] = None,
+        history: Optional[List[Dict]] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        stop: Optional[List[str]] = None,
+        **kwargs: Any
+    ) -> AsyncGenerator[str, None]:
+        """Generate a streaming response from the llama.cpp server."""
+        if not self.session:
+            raise RuntimeError("LLMManager is not initialized. Call initialize() first.")
+
+        completion_url = f"{settings.LLAMACPP_SERVER_URL}/v1/chat/completions"
         
-        prompt = self._messages_to_prompt(messages)
+        # Construct messages payload
+        messages = []
+        if history:
+            messages.extend(history)
         
+        # Append the prompt as a user message only if it's not already the last message in history
+        if prompt and (not messages or messages[-1].get('content') != prompt):
+            # Check if the prompt is a JSON string representing a list of messages
+            try:
+                prompt_messages = json.loads(prompt)
+                if isinstance(prompt_messages, list):
+                    # It's a structured prompt, use it as the message list
+                    messages = prompt_messages
+                else:
+                    # It's a simple string, append it
+                    messages.append({"role": "user", "content": prompt})
+            except json.JSONDecodeError:
+                # It's just a regular string prompt
+                messages.append({"role": "user", "content": prompt})
+
         payload = {
-            "prompt": prompt,
+            "stream": True,  # Enable streaming to get tokens as they are generated
+            "n_predict": max_tokens,
             "temperature": temperature,
-            "n_predict": max_tokens or 512,
-            "stop": ["</s>", "[INST]", "[/INST]"],
-            "stream": True
+            "stop": stop or [],
+            "messages": messages if messages else [{"role": "user", "content": prompt}]
         }
         
-        url = f"{settings.LLAMACPP_SERVER_URL}/completion"
-        
-        async with self.session.post(url, json=payload) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                raise RuntimeError(f"llama.cpp streaming error: {error_text}")
-            
-            async for line in response.content:
-                if line:
-                    try:
-                        line_text = line.decode('utf-8').strip()
-                        if line_text.startswith('data: '):
-                            data = json.loads(line_text[6:])
-                            if 'content' in data:
-                                yield data['content']
-                    except (json.JSONDecodeError, UnicodeDecodeError):
+        # For /v1/chat/completions, always send 'messages' array (do not send 'prompt')
+        # No changes needed here; payload already has 'messages' as required by OpenAI API
+
+        logger.info(f"[LLAMACPP DEBUG] Sending payload to llama.cpp at {completion_url}:")
+        logger.info(json.dumps(payload, indent=2))
+        logger.info("------------------------------------")
+
+        try:
+            async with self.session.post(completion_url, json=payload) as response:
+                logger.info(f"[LLAMACPP DEBUG] llama.cpp server response status: {response.status}")
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"llama.cpp server returned status {response.status}: {error_text}")
+                    yield f"Error: llama.cpp server returned status {response.status}"
+                    return
+
+                # Stream each chunk as-is, with minimal processing
+                async for chunk in response.content:
+                    if not chunk:
                         continue
+                    yield chunk.decode("utf-8")
+        except aiohttp.ClientConnectorError as e:
+            logger.error(f"Could not connect to llama.cpp server at {completion_url}. Connection error: {e}")
+            yield f"Error: Could not connect to llama.cpp server."
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during llama.cpp stream generation: {e}")
+            yield f"Error: An unexpected error occurred."
+
+    async def generate_response(
+        self,
+        provider: LLMProvider,
+        prompt: Optional[str] = None,
+        history: Optional[List[Dict]] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        stop: Optional[List[str]] = None,
+        **kwargs: Any
+    ) -> LLMResponse:
+        """
+        Gateway for generating a non-streaming response from a specified LLM provider.
+        Forces non-streaming (stream: false) mode to check if LLM output is more structured for ReAct parsing.
+        """
+        is_image_generation = kwargs.pop('is_image_generation', False)
+        # --- Force non-streaming mode for this call ---
+        if provider == LLMProvider.LLAMACPP:
+            if not self.session:
+                raise RuntimeError("LLMManager is not initialized. Call initialize() first.")
+            completion_url = f"{settings.LLAMACPP_SERVER_URL}/v1/chat/completions"
+            messages = []
+            if history:
+                messages.extend(history)
+            if prompt and (not messages or messages[-1].get('content') != prompt):
+                try:
+                    prompt_messages = json.loads(prompt)
+                    if isinstance(prompt_messages, list):
+                        messages = prompt_messages
+                    else:
+                        messages.append({"role": "user", "content": prompt})
+                except json.JSONDecodeError:
+                    messages.append({"role": "user", "content": prompt})
+            payload = {
+                "stream": False,  # Force non-streaming
+                "n_predict": max_tokens,
+                "temperature": temperature,
+                "stop": stop or [],
+                "messages": messages if messages else [{"role": "user", "content": prompt}]
+            }
+            logger.info(f"[LLAMACPP DEBUG] Sending NON-STREAM payload to llama.cpp at {completion_url}:")
+            logger.info(json.dumps(payload, indent=2))
+            logger.info("------------------------------------")
+            content = ""
+            try:
+                async with self.session.post(completion_url, json=payload) as response:
+                    logger.info(f"[LLAMACPP DEBUG] llama.cpp server response status: {response.status}")
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"llama.cpp server returned status {response.status}: {error_text}")
+                        content = f"Error: llama.cpp server returned status {response.status}"
+                    else:
+                        result = await response.json()
+                        # OpenAI compatible: result['choices'][0]['message']['content']
+                        content = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+            except Exception as e:
+                logger.error(f"Error in non-streaming llama.cpp completion: {e}")
+                content = f"Error: {e}"
+            model_name = settings.LLAMACPP_MODEL_NAME
+        elif provider == LLMProvider.GEMINI:
+            # For Gemini, fallback to streaming aggregation as before
+            full_response = []
+            async for chunk in self.generate_stream(
+                provider, prompt, history, temperature, max_tokens, stop, is_image_generation=is_image_generation, **kwargs
+            ):
+                full_response.append(chunk)
+            content = "".join(chunk for chunk in full_response if chunk is not None)
+            model_name = settings.GEMINI_MODEL
+        else:
+            # Default: aggregate streaming
+            full_response = []
+            async for chunk in self.generate_stream(
+                provider, prompt, history, temperature, max_tokens, stop, is_image_generation=is_image_generation, **kwargs
+            ):
+                full_response.append(chunk)
+            content = "".join(chunk for chunk in full_response if chunk is not None)
+            model_name = ""
+        return LLMResponse(
+            content=content,
+            provider=provider.value,
+            model=model_name
+        )

@@ -6,16 +6,54 @@ Manages conversation context, session state, and provides context-aware
 responses with proper memory management.
 """
 
+from __future__ import annotations
 import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 import logging
 
 from core.config import settings
 
+if TYPE_CHECKING:
+    from services.rag_service import RAGService
+
 logger = logging.getLogger(__name__)
+
+
+class MultiStepTask:
+    """Represents a multi-step task or plan."""
+    def __init__(self, original_query: str, plan: List[Dict[str, Any]]):
+        self.original_query = original_query
+        self.plan = plan
+        self.current_step = 0
+        self.status = "in_progress"  # in_progress, completed, failed
+        self.step_results: Dict[int, Any] = {}
+
+    def get_next_step(self):
+        if self.current_step < len(self.plan):
+            return self.plan[self.current_step]
+        return None
+
+    def complete_step(self, result: Any):
+        self.step_results[self.current_step] = result
+        self.current_step += 1
+        if self.current_step >= len(self.plan):
+            self.status = "completed"
+
+    def is_finished(self) -> bool:
+        """Check if the task is completed or failed."""
+        return self.status in ["completed", "failed"]
+
+    def to_dict(self):
+        return {
+            "original_query": self.original_query,
+            "plan": self.plan,
+            "current_step": self.current_step,
+            "status": self.status,
+            "step_results": self.step_results,
+        }
 
 
 class ConversationContext:
@@ -25,23 +63,26 @@ class ConversationContext:
         self.session_id = session_id
         self.created_at = datetime.utcnow()
         self.last_accessed = datetime.utcnow()
-        self.messages: List[Dict[str, Any]] = []
         self.metadata: Dict[str, Any] = {}
         self.rag_context: List[Dict[str, Any]] = []
         self.tool_usage_history: List[Dict[str, Any]] = []
-        self.current_task: Optional[str] = None
-        
+        self.current_task: Optional[MultiStepTask] = None # For Plan-and-Execute
+        self.react_state: Dict[str, Any] = {} # For ReAct agent state
+        self.messages: List[Dict[str, Any]] = []  # Store chat messages
+    
+    def init(self):
+        """Initialize the conversation with a system message."""
+        initial_message = "Welcome to Aura-PAI! Your intelligent assistant for a seamless experience. How can I help you today?"
+        self.add_message("system", initial_message)
+    
     def add_message(self, role: str, content: str, metadata: Optional[Dict] = None):
         """Add a message to the conversation."""
-        message = {
-            "id": str(uuid.uuid4()),
+        self.messages.append({
             "role": role,
             "content": content,
-            "timestamp": datetime.utcnow().isoformat(),
-            "metadata": metadata or {}
-        }
-        self.messages.append(message)
-        self.last_accessed = datetime.utcnow()
+            "metadata": metadata or {},
+            "timestamp": datetime.utcnow().isoformat()
+        })
         
     def add_rag_context(self, context: Dict[str, Any]):
         """Add RAG retrieval context."""
@@ -57,34 +98,29 @@ class ConversationContext:
             "timestamp": datetime.utcnow().isoformat()
         }
         self.tool_usage_history.append(tool_record)
-        
-    def get_recent_messages(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get recent messages within context limit."""
-        return self.messages[-limit:]
-    
-    def get_context_summary(self) -> Dict[str, Any]:
-        """Get a summary of the current context."""
-        return {
-            "session_id": self.session_id,
-            "message_count": len(self.messages),
-            "rag_contexts": len(self.rag_context),
-            "tool_usage_count": len(self.tool_usage_history),
-            "current_task": self.current_task,
-            "last_accessed": self.last_accessed.isoformat()
-        }
-    
-    def is_expired(self) -> bool:
-        """Check if the context has expired."""
-        timeout = timedelta(seconds=settings.SESSION_TIMEOUT)
-        return datetime.utcnow() - self.last_accessed > timeout
+
+    def get_react_scratchpad(self) -> str:
+        """Get the scratchpad for the ReAct agent."""
+        return self.react_state.get("scratchpad", "")
+
+    def update_react_scratchpad(self, thought: str, action: Dict[str, Any], observation: str):
+        """Update the ReAct scratchpad with the latest turn."""
+        scratchpad_entry = f"Thought: {thought}\nAction: {json.dumps(action)}\nObservation: {observation}\n"
+        current_scratchpad = self.react_state.get("scratchpad", "")
+        self.react_state["scratchpad"] = current_scratchpad + scratchpad_entry
+
+    def clear_react_state(self):
+        """Clear the ReAct state, including the scratchpad."""
+        self.react_state = {}
 
 
 class ContextManager:
-    """Manages multiple conversation contexts and provides context-aware operations."""
+    """Manages multiple conversation contexts."""
     
-    def __init__(self):
+    def __init__(self, rag_service: RAGService):
         self.contexts: Dict[str, ConversationContext] = {}
         self.cleanup_task: Optional[asyncio.Task] = None
+        self.rag_service = rag_service
         
     async def initialize(self):
         """Initialize the context manager."""
@@ -137,7 +173,7 @@ class ContextManager:
             context.last_accessed = datetime.utcnow()
         return context
     
-    def add_user_message(self, session_id: str, content: str, metadata: Optional[Dict] = None):
+    async def add_user_message(self, user_id: str, session_id: str, content: str, metadata: Optional[Dict] = None):
         """Add a user message to the conversation."""
         context = self.get_context(session_id)
         if not context:
@@ -146,26 +182,33 @@ class ContextManager:
             context = self.get_context(session_id)
         
         context.add_message("user", content, metadata)
+        if self.rag_service:
+            await self.rag_service.add_chat_message(user_id, session_id, content, "user", metadata)
         
-    def add_assistant_message(self, session_id: str, content: str, metadata: Optional[Dict] = None):
+    async def add_assistant_message(self, user_id: str, session_id: str, content: str, metadata: Optional[Dict] = None):
         """Add an assistant message to the conversation."""
         context = self.get_context(session_id)
-        if context:
-            context.add_message("assistant", content, metadata)
+        if not context:
+            logger.warning(f"Session {session_id} not found, but adding assistant message anyway.")
+            context = self.create_session(session_id)
+
+        context.add_message("assistant", content, metadata)
+        if self.rag_service:
+            await self.rag_service.add_chat_message(user_id, session_id, content, "assistant", metadata)
     
-    def add_system_message(self, session_id: str, content: str, metadata: Optional[Dict] = None):
+    async def add_system_message(self, user_id: str, session_id: str, content: str, metadata: Optional[Dict] = None):
         """Add a system message to the conversation."""
         context = self.get_context(session_id)
         if context:
             context.add_message("system", content, metadata)
+            if self.rag_service:
+                await self.rag_service.add_chat_message(user_id, session_id, content, "system", metadata)
     
-    def get_conversation_history(self, session_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_conversation_history(self, user_id: str, session_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Get conversation history for a session."""
-        context = self.get_context(session_id)
-        if not context:
-            return []
-        
-        return context.get_recent_messages(limit)
+        if self.rag_service:
+            return await self.rag_service.get_chat_history(user_id, session_id, limit)
+        return []
     
     def build_context_for_llm(self, session_id: str, include_rag: bool = True, include_tools: bool = True) -> Dict[str, Any]:
         """Build context information for LLM requests."""
@@ -180,7 +223,7 @@ class ContextManager:
         
         result = {
             "messages": context.get_recent_messages(),
-            "current_task": context.current_task
+            "current_task": context.current_task.to_dict() if context.current_task else None
         }
         
         if include_rag:
@@ -191,56 +234,41 @@ class ContextManager:
         
         return result
     
-    def set_current_task(self, session_id: str, task: str):
+    def set_current_task(self, session_id: str, task: MultiStepTask):
         """Set the current task for a session."""
         context = self.get_context(session_id)
         if context:
             context.current_task = task
-    
-    def clear_current_task(self, session_id: str):
-        """Clear the current task for a session."""
+
+    def get_current_task(self, session_id: str) -> Optional[MultiStepTask]:
+        """Get the current task for a session."""
         context = self.get_context(session_id)
         if context:
-            context.current_task = None
-    
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a conversation session."""
-        if session_id in self.contexts:
-            del self.contexts[session_id]
-            logger.info(f"Deleted session: {session_id}")
-            return True
-        return False
-    
-    def get_session_stats(self) -> Dict[str, Any]:
-        """Get statistics about current sessions."""
-        return {
-            "total_sessions": len(self.contexts),
-            "max_sessions": settings.MAX_SESSIONS,
-            "sessions": [
-                ctx.get_context_summary() for ctx in self.contexts.values()
-            ]
-        }
-    
+            return context.current_task
+        return None
+
+    def get_session_stats(self) -> List[Dict[str, Any]]:
+        """Get statistics for all active sessions."""
+        return [
+            {
+                "session_id": c.session_id,
+                "created_at": c.created_at.isoformat(),
+                "last_accessed": c.last_accessed.isoformat(),
+                "message_count": len(c.messages),
+                "current_task": c.current_task.to_dict() if c.current_task else None
+            }
+            for c in self.contexts.values()
+        ]
+
     async def _cleanup_expired_contexts(self):
-        """Background task to clean up expired contexts."""
+        """Periodically clean up expired contexts."""
         while True:
-            try:
-                await asyncio.sleep(300)  # Check every 5 minutes
-                
-                expired_sessions = [
-                    session_id for session_id, context in self.contexts.items()
-                    if context.is_expired()
-                ]
-                
-                for session_id in expired_sessions:
-                    del self.contexts[session_id]
-                    logger.info(f"Cleaned up expired session: {session_id}")
-                
-                if expired_sessions:
-                    logger.info(f"Cleaned up {len(expired_sessions)} expired sessions")
-                    
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in context cleanup: {e}")
-                await asyncio.sleep(60)  # Wait before retrying
+            await asyncio.sleep(settings.SESSION_CLEANUP_INTERVAL)
+            
+            expired_sessions = [
+                sid for sid, context in self.contexts.items() if context.is_expired()
+            ]
+            
+            for sid in expired_sessions:
+                del self.contexts[sid]
+                logger.info(f"Cleaned up expired session: {sid}")

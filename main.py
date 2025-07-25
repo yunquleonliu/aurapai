@@ -14,11 +14,14 @@ import logging
 from typing import Dict, Any
 
 from core.config import settings
-from api.routes import chat, rag, tools, health
+from api.routes import chat, knowledge, tools # Import the routers
 from services.llm_manager import LLMManager
 from services.rag_service import RAGService
 from services.tool_service import ToolService
+from services.image_generation_service import ImageGenerationService
 from core.context_manager import ContextManager
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 # Configure logging
 logging.basicConfig(
@@ -31,16 +34,17 @@ logger = logging.getLogger(__name__)
 llm_manager: LLMManager = None
 rag_service: RAGService = None
 tool_service: ToolService = None
+image_generation_service: ImageGenerationService = None
 context_manager: ContextManager = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
-    global llm_manager, rag_service, tool_service, context_manager
+    global llm_manager, rag_service, tool_service, image_generation_service, context_manager
     
     # Startup
-    logger.info("Starting Auro-PAI Platform Backend...")
+    logger.info("Starting Aura-PAI Platform Backend...")
     
     try:
         # Initialize services
@@ -50,16 +54,20 @@ async def lifespan(app: FastAPI):
         rag_service = RAGService()
         await rag_service.initialize()
         
-        tool_service = ToolService()
+        image_generation_service = ImageGenerationService()
+        await image_generation_service.initialize()
+
+        tool_service = ToolService(llm_manager=llm_manager)
         await tool_service.initialize()
         
-        context_manager = ContextManager()
+        context_manager = ContextManager(rag_service)
         await context_manager.initialize()
         
         # Store services in app state for access in routes
         app.state.llm_manager = llm_manager
         app.state.rag_service = rag_service
         app.state.tool_service = tool_service
+        app.state.image_generation_service = image_generation_service
         app.state.context_manager = context_manager
         
         logger.info("All services initialized successfully")
@@ -75,6 +83,8 @@ async def lifespan(app: FastAPI):
     
     if context_manager:
         await context_manager.cleanup()
+    if image_generation_service:
+        await image_generation_service.cleanup()
     if tool_service:
         await tool_service.cleanup()
     if rag_service:
@@ -87,11 +97,14 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI application
 app = FastAPI(
-    title="Auro-PAI Platform Backend",
-    description="AI assistance platform with local LLM, RAG, and tool integration",
-    version="1.0.0",
+    title="Aura-PAI Platform Backend",
+    description="Central coordinator for the Auro-PAI platform.",
+    version="0.1.0",
     lifespan=lifespan
 )
+
+# Mount static files directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Add CORS middleware
 app.add_middleware(
@@ -102,66 +115,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include API routes
-app.include_router(health.router, prefix="/api/v1", tags=["health"])
-app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
-app.include_router(rag.router, prefix="/api/v1", tags=["rag"])
-app.include_router(tools.router, prefix="/api/v1", tags=["tools"])
-
-# Add convenience routes without /api prefix for easier access
-app.include_router(health.router, prefix="/v1", tags=["health-simple"])
-app.include_router(chat.router, prefix="/v1", tags=["chat-simple"])
-app.include_router(rag.router, prefix="/v1", tags=["rag-simple"])
-app.include_router(tools.router, prefix="/v1", tags=["tools-simple"])
+# Include API routers
+app.include_router(chat.router, prefix="/api/v1", tags=["Chat"])
+app.include_router(knowledge.router, tags=["Knowledge"])
+app.include_router(tools.router, prefix="/api/v1", tags=["Tools"])
 
 
-@app.get("/")
-async def root():
-    """Root endpoint with platform information."""
-    return {
-        "name": "Auro-PAI Platform Backend",
-        "version": "1.0.0",
-        "description": "AI assistance platform for Average Joys with local LLM integration",
-        "status": "running"
-    }
+@app.get("/", include_in_schema=False)
+async def read_index():
+    return FileResponse('static/index.html')
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse('static/favicon.ico')
 
-@app.get("/api/v1/status")
-async def status():
-    """Get overall platform status."""
-    try:
-        status_info = {
-            "platform": "healthy",
-            "services": {}
-        }
-        
-        # Check LLM service
-        if app.state.llm_manager:
-            llm_status = await app.state.llm_manager.health_check()
-            status_info["services"]["llm"] = llm_status
-        
-        # Check RAG service
-        if app.state.rag_service:
-            rag_status = await app.state.rag_service.health_check()
-            status_info["services"]["rag"] = rag_status
-        
-        # Check Tool service
-        if app.state.tool_service:
-            tool_status = await app.state.tool_service.health_check()
-            status_info["services"]["tools"] = tool_status
-        
-        return status_info
-        
-    except Exception as e:
-        logger.error(f"Status check failed: {e}")
-        raise HTTPException(status_code=500, detail="Status check failed")
-
-
+# Main entry point
 if __name__ == "__main__":
+    logger.info(f"Starting server, listening on {settings.HOST}:{settings.PORT}")
     uvicorn.run(
-        "main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=settings.DEBUG,
-        log_level="info"
+        "main:app", 
+        host=settings.HOST, 
+        port=settings.PORT, 
+        reload=settings.RELOAD
     )

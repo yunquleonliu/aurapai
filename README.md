@@ -98,7 +98,7 @@ Key configuration options in `.env`:
 
 ```bash
 # LLM Configuration
-LLAMACPP_SERVER_URL=http://localhost:8080
+LLAMACPP_SERVER_URL=http://10.0.0.206:8080
 LLAMACPP_MODEL_NAME=mixtral-8x7b-instruct
 
 # RAG Configuration
@@ -346,7 +346,7 @@ curl http://localhost:8000/api/v1/health
 
 ## License
 
-[Add your license information here]
+This project is licensed under the [Open License for Privacy and Transparency](LICENSE.md). See the `LICENSE.md` file for details.
 
 ## Support
 
